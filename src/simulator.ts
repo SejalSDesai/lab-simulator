@@ -6,7 +6,9 @@ import type {
   ValidationError,
   SimulationResult,
   SimulationStats,
+  WellAddress,
 } from './types';
+import { RESERVOIR_MAX_VOLUME } from './types';
 
 function deepCopyPlates(plates: Plate[]): Plate[] {
   return plates.map(plate => ({
@@ -26,13 +28,30 @@ function findWell(plates: Plate[], plateId: string, wellId: string): Well | null
   return null;
 }
 
+function isReservoirWell(well: Well): boolean {
+  return well.maxVolume >= RESERVOIR_MAX_VOLUME;
+}
+
+function getDestAddresses(step: ProtocolStep): WellAddress[] {
+  return step.destAddresses && step.destAddresses.length > 0
+    ? step.destAddresses
+    : [step.destAddress];
+}
+
+function volumePerDest(step: ProtocolStep, numDests: number): number {
+  return step.volumeMode === 'distribute' ? step.volume / numDests : step.volume;
+}
+
+function totalVolumeNeeded(step: ProtocolStep, numDests: number): number {
+  return step.volumeMode === 'distribute' ? step.volume : step.volume * numDests;
+}
+
 export function validateProtocol(
   steps: ProtocolStep[],
   plates: Plate[],
   pipettes: Pipette[],
 ): ValidationError[] {
   const errors: ValidationError[] = [];
-  // Simulate on a copy so cascading volume errors are caught in sequence
   const simPlates = deepCopyPlates(plates);
 
   steps.forEach((step, index) => {
@@ -49,10 +68,15 @@ export function validateProtocol(
       return;
     }
 
-    if (step.volume < pipette.minVolume || step.volume > pipette.maxVolume) {
+    const dests     = getDestAddresses(step);
+    const numDests  = dests.length;
+    const perDest   = volumePerDest(step, numDests);
+    const totalVol  = totalVolumeNeeded(step, numDests);
+
+    if (perDest < pipette.minVolume || perDest > pipette.maxVolume) {
       errors.push({
         stepId: step.id, stepIndex: index,
-        message: `Step ${n}: ${step.volume} µL is outside ${pipette.name} range (${pipette.minVolume}–${pipette.maxVolume} µL).`,
+        message: `Step ${n}: ${perDest.toFixed(1)} µL/well is outside ${pipette.name} range (${pipette.minVolume}–${pipette.maxVolume} µL).`,
         severity: 'error',
       });
     }
@@ -63,56 +87,70 @@ export function validateProtocol(
       return;
     }
 
-    if (src.volume < step.volume) {
+    if (!isReservoirWell(src) && src.volume < totalVol) {
       errors.push({
         stepId: step.id, stepIndex: index,
-        message: `Step ${n}: Source ${step.sourceAddress.wellId} has ${src.volume} µL — need ${step.volume} µL.`,
+        message: `Step ${n}: Source ${step.sourceAddress.wellId} has ${src.volume} µL — need ${totalVol} µL.`,
         severity: 'error',
       });
     }
 
-    const dst = findWell(simPlates, step.destAddress.plateId, step.destAddress.wellId);
-    if (!dst) {
-      errors.push({ stepId: step.id, stepIndex: index, message: `Step ${n}: Destination well ${step.destAddress.wellId} not found.`, severity: 'error' });
-      return;
+    for (const destAddr of dests) {
+      const dst = findWell(simPlates, destAddr.plateId, destAddr.wellId);
+      if (!dst) {
+        errors.push({ stepId: step.id, stepIndex: index, message: `Step ${n}: Destination well ${destAddr.wellId} not found.`, severity: 'error' });
+        continue;
+      }
+      if (dst.volume + perDest > dst.maxVolume) {
+        errors.push({
+          stepId: step.id, stepIndex: index,
+          message: `Step ${n}: Destination ${destAddr.wellId} would overflow (${dst.volume} + ${perDest.toFixed(1)} > ${dst.maxVolume} µL max).`,
+          severity: 'error',
+        });
+      }
+      if (
+        step.sourceAddress.plateId === destAddr.plateId &&
+        step.sourceAddress.wellId  === destAddr.wellId
+      ) {
+        errors.push({ stepId: step.id, stepIndex: index, message: `Step ${n}: Source and destination are the same well.`, severity: 'warning' });
+      }
     }
 
-    if (dst.volume + step.volume > dst.maxVolume) {
-      errors.push({
-        stepId: step.id, stepIndex: index,
-        message: `Step ${n}: Destination ${step.destAddress.wellId} would overflow (${dst.volume} + ${step.volume} > ${dst.maxVolume} µL max).`,
-        severity: 'error',
-      });
-    }
-
-    if (
-      step.sourceAddress.plateId === step.destAddress.plateId &&
-      step.sourceAddress.wellId  === step.destAddress.wellId
-    ) {
-      errors.push({ stepId: step.id, stepIndex: index, message: `Step ${n}: Source and destination are the same well.`, severity: 'warning' });
-    }
-
-    // Apply step to simulated plates so later steps see updated volumes
     const hasBlockingError = errors.some(e => e.stepIndex === index && e.severity === 'error');
     if (!hasBlockingError) {
-      src.volume -= step.volume;
-      dst.volume += step.volume;
-      dst.liquidType = step.liquidType;
+      if (!isReservoirWell(src)) src.volume -= totalVol;
+      for (const destAddr of dests) {
+        const dst = findWell(simPlates, destAddr.plateId, destAddr.wellId);
+        if (dst) {
+          dst.volume    += perDest;
+          dst.liquidType = step.liquidType;
+        }
+      }
     }
   });
 
   return errors;
 }
 
-// Apply a single step to a plate array, returning new plates (used for animation).
 export function applyStep(plates: Plate[], step: ProtocolStep): Plate[] {
-  const updated = deepCopyPlates(plates);
-  const src = findWell(updated, step.sourceAddress.plateId, step.sourceAddress.wellId);
-  const dst = findWell(updated, step.destAddress.plateId, step.destAddress.wellId);
-  if (!src || !dst) return plates;
-  src.volume -= step.volume;
-  dst.volume += step.volume;
-  dst.liquidType = step.liquidType;
+  const updated  = deepCopyPlates(plates);
+  const src      = findWell(updated, step.sourceAddress.plateId, step.sourceAddress.wellId);
+  if (!src) return plates;
+
+  const dests    = getDestAddresses(step);
+  const numDests = dests.length;
+  const perDest  = volumePerDest(step, numDests);
+  const totalVol = totalVolumeNeeded(step, numDests);
+
+  if (!isReservoirWell(src)) src.volume -= totalVol;
+
+  for (const destAddr of dests) {
+    const dst = findWell(updated, destAddr.plateId, destAddr.wellId);
+    if (dst) {
+      dst.volume    += perDest;
+      dst.liquidType = step.liquidType;
+    }
+  }
   return updated;
 }
 
@@ -122,7 +160,7 @@ export function executeProtocol(
   pipettes: Pipette[],
 ): { plates: Plate[]; result: SimulationResult } {
   const validationErrors = validateProtocol(steps, plates, pipettes);
-  const blockingErrors = validationErrors.filter(e => e.severity === 'error');
+  const blockingErrors   = validationErrors.filter(e => e.severity === 'error');
 
   if (blockingErrors.length > 0) {
     const stats: SimulationStats = {
@@ -143,26 +181,37 @@ export function executeProtocol(
     };
   }
 
-  const updatedPlates = deepCopyPlates(plates);
-  let totalVolume = 0;
-  let tipChanges = 0;
-  let lastPipetteId = '';
-  let completedSteps = 0;
+  const updatedPlates  = deepCopyPlates(plates);
+  let totalVolume      = 0;
+  let tipChanges       = 0;
+  let lastPipetteId    = '';
+  let completedSteps   = 0;
 
   for (const step of steps) {
     const src = findWell(updatedPlates, step.sourceAddress.plateId, step.sourceAddress.wellId);
-    const dst = findWell(updatedPlates, step.destAddress.plateId, step.destAddress.wellId);
-    if (!src || !dst) continue;
+    if (!src) continue;
+
+    const dests    = getDestAddresses(step);
+    const numDests = dests.length;
+    const perDest  = volumePerDest(step, numDests);
+    const totalVol = totalVolumeNeeded(step, numDests);
 
     if (step.pipetteId !== lastPipetteId) {
       tipChanges++;
       lastPipetteId = step.pipetteId;
     }
 
-    src.volume -= step.volume;
-    dst.volume += step.volume;
-    dst.liquidType = step.liquidType;
-    totalVolume += step.volume;
+    if (!isReservoirWell(src)) src.volume -= totalVol;
+
+    for (const destAddr of dests) {
+      const dst = findWell(updatedPlates, destAddr.plateId, destAddr.wellId);
+      if (dst) {
+        dst.volume    += perDest;
+        dst.liquidType = step.liquidType;
+      }
+    }
+
+    totalVolume += totalVol;
     completedSteps++;
   }
 

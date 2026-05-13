@@ -5,6 +5,7 @@ import type {
   ProtocolStep,
   LiquidCategory,
   SimulationResult,
+  WellAddress,
 } from '../types';
 import { PIPETTE_PRESETS, LIQUID_COLORS } from '../types';
 import { generateId, isValidWellId, getPlateById } from '../utils';
@@ -15,6 +16,7 @@ interface ProtocolBuilderProps {
   protocol: Protocol;
   plates: Plate[];
   selectedPipetteId: string;
+  selectedWells: WellAddress[];
   animatingStep: number;
   simResult: SimulationResult | null;
   darkMode: boolean;
@@ -29,23 +31,32 @@ interface StepFormState {
   volume: string;
   pipetteId: string;
   liquidType: LiquidCategory;
+  volumeMode: 'each' | 'distribute';
 }
 
 const DEFAULT_FORM: StepFormState = {
-  srcPlateId: '',
-  srcWellId: '',
-  dstPlateId: '',
-  dstWellId: '',
-  volume: '50',
-  pipetteId: 'p200',
-  liquidType: 'sample',
+  srcPlateId:  '',
+  srcWellId:   '',
+  dstPlateId:  '',
+  dstWellId:   '',
+  volume:      '50',
+  pipetteId:   'p200',
+  liquidType:  'sample',
+  volumeMode:  'each',
 };
 
 function stepDescription(step: ProtocolStep, plates: Plate[]): string {
   const srcPlate = getPlateById(plates, step.sourceAddress.plateId);
+  const src      = `${srcPlate?.name ?? '?'} ${step.sourceAddress.wellId}`;
+
+  if (step.destAddresses && step.destAddresses.length > 1) {
+    const n    = step.destAddresses.length;
+    const mode = step.volumeMode === 'distribute' ? `÷${n}` : `×${n}`;
+    return `${src} → ${n} wells  ·  ${step.volume} µL ${mode}`;
+  }
+
   const dstPlate = getPlateById(plates, step.destAddress.plateId);
-  const src = `${srcPlate?.name ?? '?'} ${step.sourceAddress.wellId}`;
-  const dst = `${dstPlate?.name ?? '?'} ${step.destAddress.wellId}`;
+  const dst      = `${dstPlate?.name ?? '?'} ${step.destAddress.wellId}`;
   return `${src} → ${dst}  ·  ${step.volume} µL`;
 }
 
@@ -53,6 +64,7 @@ export default function ProtocolBuilder({
   protocol,
   plates,
   selectedPipetteId,
+  selectedWells,
   animatingStep,
   simResult,
   darkMode: _darkMode,
@@ -60,7 +72,7 @@ export default function ProtocolBuilder({
 }: ProtocolBuilderProps) {
   const [form, setForm] = useState<StepFormState>({
     ...DEFAULT_FORM,
-    pipetteId: selectedPipetteId || DEFAULT_FORM.pipetteId,
+    pipetteId:  selectedPipetteId || DEFAULT_FORM.pipetteId,
     srcPlateId: plates[0]?.id ?? '',
     dstPlateId: plates[0]?.id ?? '',
   });
@@ -71,31 +83,46 @@ export default function ProtocolBuilder({
     setFormError('');
   };
 
+  const isMultiDest = selectedWells.length > 1;
+
   const addStep = () => {
     const srcPlate = getPlateById(plates, form.srcPlateId);
-    const dstPlate = getPlateById(plates, form.dstPlateId);
     const volume   = parseFloat(form.volume);
 
     if (!srcPlate) { setFormError('Select a source plate.'); return; }
-    if (!dstPlate) { setFormError('Select a destination plate.'); return; }
     if (!form.srcWellId || !isValidWellId(form.srcWellId.toUpperCase(), srcPlate)) {
       setFormError(`"${form.srcWellId}" is not a valid well in ${srcPlate.name}.`);
       return;
     }
-    if (!form.dstWellId || !isValidWellId(form.dstWellId.toUpperCase(), dstPlate)) {
-      setFormError(`"${form.dstWellId}" is not a valid well in ${dstPlate.name}.`);
-      return;
-    }
     if (isNaN(volume) || volume <= 0) { setFormError('Volume must be a positive number.'); return; }
 
+    let dstWells: WellAddress[];
+
+    if (isMultiDest) {
+      dstWells = selectedWells;
+    } else {
+      const dstPlate = getPlateById(plates, form.dstPlateId);
+      if (!dstPlate) { setFormError('Select a destination plate.'); return; }
+      if (!form.dstWellId || !isValidWellId(form.dstWellId.toUpperCase(), dstPlate)) {
+        setFormError(`"${form.dstWellId}" is not a valid well in ${dstPlate.name}.`);
+        return;
+      }
+      dstWells = [{ plateId: form.dstPlateId, wellId: form.dstWellId.toUpperCase() }];
+    }
+
     const step: ProtocolStep = {
-      id: generateId(),
+      id:            generateId(),
       sourceAddress: { plateId: form.srcPlateId, wellId: form.srcWellId.toUpperCase() },
-      destAddress:   { plateId: form.dstPlateId, wellId: form.dstWellId.toUpperCase() },
+      destAddress:   dstWells[0],
       volume,
-      pipetteId:   form.pipetteId,
-      liquidType:  form.liquidType,
+      pipetteId:     form.pipetteId,
+      liquidType:    form.liquidType,
     };
+
+    if (dstWells.length > 1) {
+      step.destAddresses = dstWells;
+      step.volumeMode    = form.volumeMode;
+    }
 
     onProtocolChange({
       ...protocol,
@@ -200,8 +227,11 @@ export default function ProtocolBuilder({
       <div className="border-t border-gray-200 dark:border-gray-700 px-3 py-3 space-y-2 shrink-0 bg-gray-50 dark:bg-gray-800/80">
         <p className="text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide">Add Transfer Step</p>
 
-        {plates.length < 2 && (
+        {!isMultiDest && plates.length < 2 && (
           <p className="text-xs text-amber-500 italic">Add at least 2 plates to the canvas first.</p>
+        )}
+        {isMultiDest && plates.length < 1 && (
+          <p className="text-xs text-amber-500 italic">Add a plate to the canvas first.</p>
         )}
 
         {/* Source */}
@@ -230,31 +260,56 @@ export default function ProtocolBuilder({
           </div>
         </div>
 
-        {/* Destination */}
-        <div className="grid grid-cols-2 gap-1">
-          <div>
-            <label className={labelCls}>Dest Plate</label>
-            <select
-              value={form.dstPlateId}
-              onChange={e => updateField('dstPlateId', e.target.value)}
-              className={inputCls}
-            >
-              <option value="">— plate —</option>
-              {plates.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
+        {/* Destination — single or multi */}
+        {isMultiDest ? (
+          <div className="space-y-1">
+            <label className={labelCls}>Destination</label>
+            <div className="flex items-center gap-2">
+              <span className="flex-1 text-xs px-2 py-1.5 bg-indigo-50 dark:bg-indigo-900/30 rounded border border-indigo-200 dark:border-indigo-700 text-indigo-700 dark:text-indigo-300 font-medium">
+                {selectedWells.length} wells selected
+              </span>
+              <select
+                value={form.volumeMode}
+                onChange={e => updateField('volumeMode', e.target.value as 'each' | 'distribute')}
+                className={`${inputCls} flex-1`}
+                title="Volume mode"
+              >
+                <option value="each">Per well</option>
+                <option value="distribute">Distribute</option>
+              </select>
+            </div>
+            <p className="text-xs text-gray-400 dark:text-gray-500">
+              {form.volumeMode === 'each'
+                ? `Each of the ${selectedWells.length} wells gets ${form.volume} µL`
+                : `${form.volume} µL split equally: ~${(parseFloat(form.volume) / selectedWells.length || 0).toFixed(1)} µL/well`}
+            </p>
           </div>
-          <div>
-            <label className={labelCls}>Dest Well</label>
-            <input
-              type="text"
-              placeholder="e.g. B3"
-              value={form.dstWellId}
-              onChange={e => updateField('dstWellId', e.target.value)}
-              className={inputCls}
-              maxLength={4}
-            />
+        ) : (
+          <div className="grid grid-cols-2 gap-1">
+            <div>
+              <label className={labelCls}>Dest Plate</label>
+              <select
+                value={form.dstPlateId}
+                onChange={e => updateField('dstPlateId', e.target.value)}
+                className={inputCls}
+              >
+                <option value="">— plate —</option>
+                {plates.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={labelCls}>Dest Well</label>
+              <input
+                type="text"
+                placeholder="e.g. B3"
+                value={form.dstWellId}
+                onChange={e => updateField('dstWellId', e.target.value)}
+                className={inputCls}
+                maxLength={4}
+              />
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Volume + liquid */}
         <div className="grid grid-cols-2 gap-1">

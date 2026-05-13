@@ -10,6 +10,9 @@ interface ToolbarProps {
   onSave: () => void;
   onLoad: () => void;
   onClear: () => void;
+  onExportCSV: () => void;
+  onImport: () => void;
+  onShowStats: () => void;
   onToggleDark: () => void;
 }
 
@@ -23,6 +26,9 @@ export default function Toolbar({
   onSave,
   onLoad,
   onClear,
+  onExportCSV,
+  onImport,
+  onShowStats,
   onToggleDark,
 }: ToolbarProps) {
   return (
@@ -51,7 +57,7 @@ export default function Toolbar({
         </div>
       )}
 
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-1 flex-wrap">
         <button
           onClick={onRun}
           disabled={simRunning}
@@ -69,15 +75,18 @@ export default function Toolbar({
           onClick={onReset}
           disabled={simRunning}
           className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded text-sm font-medium transition-colors"
-          title="Reset well volumes to initial state"
+          title="Reset well volumes"
         >
           Reset
         </button>
 
+        {/* Separator */}
+        <span className="w-px h-5 bg-indigo-500 mx-0.5" />
+
         <button
           onClick={onSave}
           className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded text-sm font-medium transition-colors"
-          title="Save protocol to localStorage"
+          title="Save to localStorage"
         >
           Save
         </button>
@@ -85,10 +94,43 @@ export default function Toolbar({
         <button
           onClick={onLoad}
           className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded text-sm font-medium transition-colors"
-          title="Load protocol from localStorage"
+          title="Load from localStorage"
         >
           Load
         </button>
+
+        <button
+          onClick={onImport}
+          disabled={simRunning}
+          className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded text-sm font-medium transition-colors"
+          title="Import protocol from CSV / JSON / Excel / text file"
+        >
+          Import
+        </button>
+
+        {/* Separator */}
+        <span className="w-px h-5 bg-indigo-500 mx-0.5" />
+
+        <button
+          onClick={onExportCSV}
+          disabled={simRunning}
+          className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded text-sm font-medium transition-colors"
+          title="Export protocol as CSV"
+        >
+          CSV
+        </button>
+
+        <button
+          onClick={onShowStats}
+          disabled={!simResult}
+          className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-30 disabled:cursor-not-allowed rounded text-sm font-medium transition-colors"
+          title="View simulation statistics"
+        >
+          Stats
+        </button>
+
+        {/* Separator */}
+        <span className="w-px h-5 bg-indigo-500 mx-0.5" />
 
         <button
           onClick={onClear}

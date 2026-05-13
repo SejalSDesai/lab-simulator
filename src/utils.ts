@@ -1,5 +1,5 @@
 import type { Plate, Well, PlateType, WellAddress } from './types';
-import { PLATE_CONFIGS, ROW_LABELS, PLATE_PADDING, PLATE_LABEL_HEIGHT } from './types';
+import { PLATE_CONFIGS, ROW_LABELS, PLATE_PADDING, PLATE_LABEL_HEIGHT, RESERVOIR_MAX_VOLUME } from './types';
 
 export function generateId(): string {
   return crypto.randomUUID();
@@ -42,6 +42,13 @@ export function createPlate(type: PlateType, name: string, x: number, y: number)
       createWell(row, col, config.wellMaxVolume)
     )
   );
+
+  // Reservoirs start pre-filled with reagent so they are immediately usable
+  if (type === 'reservoir') {
+    wells[0][0].volume     = RESERVOIR_MAX_VOLUME;
+    wells[0][0].liquidType = 'reagent';
+  }
+
   return {
     id: generateId(),
     type,
@@ -55,7 +62,11 @@ export function createPlate(type: PlateType, name: string, x: number, y: number)
 }
 
 export function getPlateSize(type: PlateType): { width: number; height: number } {
-  const { cellSize, gap, rows, cols } = PLATE_CONFIGS[type];
+  const config = PLATE_CONFIGS[type];
+  if (config.fixedWidth !== undefined && config.fixedHeight !== undefined) {
+    return { width: config.fixedWidth, height: config.fixedHeight };
+  }
+  const { cellSize, gap, rows, cols } = config;
   const innerWidth  = cols * (cellSize + gap) - gap;
   const innerHeight = rows * (cellSize + gap) - gap;
   return {

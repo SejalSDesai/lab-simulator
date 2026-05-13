@@ -1,4 +1,4 @@
-export type PlateType = '96-well' | '384-well' | 'deep-well-96';
+export type PlateType = '96-well' | '384-well' | 'deep-well-96' | 'reservoir';
 export type LiquidCategory = 'reagent' | 'buffer' | 'sample' | 'water' | 'empty';
 
 export interface Well {
@@ -38,6 +38,10 @@ export interface ProtocolStep {
   id: string;
   sourceAddress: WellAddress;
   destAddress: WellAddress;
+  /** When set, transfer goes to ALL of these wells (overrides destAddress for execution). */
+  destAddresses?: WellAddress[];
+  /** 'each' = volume per well; 'distribute' = split total volume equally among all dests. */
+  volumeMode?: 'each' | 'distribute';
   volume: number;
   pipetteId: string;
   liquidType: LiquidCategory;
@@ -86,17 +90,26 @@ export interface PlateConfig {
   label: string;
   cellSize: number;
   gap: number;
+  /** Override total rendered width (used by reservoir). */
+  fixedWidth?: number;
+  /** Override total rendered height (used by reservoir). */
+  fixedHeight?: number;
 }
 
-export const PLATE_PADDING = 12;
+export const PLATE_PADDING      = 12;
 export const PLATE_LABEL_HEIGHT = 22;
+
+/** Sentinel value stored in well.maxVolume to mark an infinite-volume reservoir well. */
+export const RESERVOIR_MAX_VOLUME = 10_000_000;
 
 export const ROW_LABELS: readonly string[] = 'ABCDEFGHIJKLMNOP'.split('');
 
 export const PLATE_CONFIGS: Record<PlateType, PlateConfig> = {
-  '96-well':      { rows: 8,  cols: 12, wellMaxVolume: 300,  label: '96-Well Plate',      cellSize: 16, gap: 2 },
-  '384-well':     { rows: 16, cols: 24, wellMaxVolume: 120,  label: '384-Well Plate',     cellSize: 8,  gap: 1 },
-  'deep-well-96': { rows: 8,  cols: 12, wellMaxVolume: 2000, label: '96-Deep-Well Plate', cellSize: 16, gap: 2 },
+  '96-well':      { rows: 8,  cols: 12, wellMaxVolume: 300,               label: '96-Well Plate',      cellSize: 16, gap: 2 },
+  '384-well':     { rows: 16, cols: 24, wellMaxVolume: 120,               label: '384-Well Plate',     cellSize: 8,  gap: 1 },
+  'deep-well-96': { rows: 8,  cols: 12, wellMaxVolume: 2000,              label: '96-Deep-Well Plate', cellSize: 16, gap: 2 },
+  reservoir:      { rows: 1,  cols: 1,  wellMaxVolume: RESERVOIR_MAX_VOLUME, label: 'Reagent Reservoir',  cellSize: 60, gap: 0,
+                    fixedWidth: 200, fixedHeight: 90 },
 };
 
 export const LIQUID_COLORS: Record<LiquidCategory, string> = {

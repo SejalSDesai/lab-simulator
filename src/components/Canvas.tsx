@@ -2,7 +2,10 @@ import { useRef, useEffect, useState, forwardRef, useImperativeHandle } from 're
 import { Stage, Layer, Rect, Line, Group, Circle as KonvaCircle } from 'react-konva';
 import Konva from 'konva';
 import PlateComponent from './PlateComponent';
-import type { Plate, ProtocolStep, SimulationResult, LiquidCategory } from '../types';
+import type { Plate, ProtocolStep, SimulationResult, LiquidCategory, WellAddress } from '../types';
+import {
+  PLATE_CONFIGS, PLATE_PADDING, PLATE_LABEL_HEIGHT, RESERVOIR_MAX_VOLUME,
+} from '../types';
 import { snapToGrid } from '../utils';
 import { applyStep } from '../simulator';
 import {
@@ -13,24 +16,24 @@ import {
 } from '../utils/animationHelpers';
 
 const GRID_SIZE  = 40;
-const HOME_X     = 30;   // pipette resting position (canvas coords)
+const HOME_X     = 30;
 const HOME_Y     = 30;
-// Duration constants in seconds (Konva convention)
-const DUR_TRAVEL = 0.45; // pipette moves between wells
-const DUR_RETURN = 0.30; // pipette returns home
-const DUR_COLOR  = 0.30; // well color transition
+const DUR_TRAVEL = 0.45;
+const DUR_RETURN = 0.30;
+const DUR_COLOR  = 0.30;
 
 interface CanvasProps {
   plates: Plate[];
   selectedPlateId: string | null;
+  selectedWells: WellAddress[];
   animatingStepIndex: number;
   darkMode: boolean;
   onPlateSelect: (plateId: string | null) => void;
   onPlateDrop: (plateId: string, x: number, y: number) => void;
-  onWellClick: (plateId: string, wellId: string) => void;
+  onWellClick: (plateId: string, wellId: string, modifiers: { shift: boolean; ctrl: boolean }) => void;
+  onWellsSelect: (wells: WellAddress[]) => void;
 }
 
-/** Imperative API exposed to App via ref so it can trigger animations. */
 export interface CanvasHandle {
   runAnimation: (
     steps: ProtocolStep[],
@@ -42,18 +45,78 @@ export interface CanvasHandle {
   cancelAnimation: () => void;
 }
 
+/** Compute which wells fall inside a rubber-band rect (canvas coords). */
+function computeWellsInRect(
+  plates: Plate[],
+  rect: { x1: number; y1: number; x2: number; y2: number },
+): WellAddress[] {
+  const minX = Math.min(rect.x1, rect.x2);
+  const maxX = Math.max(rect.x1, rect.x2);
+  const minY = Math.min(rect.y1, rect.y2);
+  const maxY = Math.max(rect.y1, rect.y2);
+
+  const result: WellAddress[] = [];
+
+  for (const plate of plates) {
+    if (plate.type === 'reservoir') continue; // reservoir is one big trough, skip rubber-band selection
+    const config = PLATE_CONFIGS[plate.type];
+    for (const row of plate.wells) {
+      for (const well of row) {
+        const cx = plate.x + PLATE_PADDING + well.col * (config.cellSize + config.gap) + config.cellSize / 2;
+        const cy = plate.y + PLATE_LABEL_HEIGHT + PLATE_PADDING + well.row * (config.cellSize + config.gap) + config.cellSize / 2;
+        if (cx >= minX && cx <= maxX && cy >= minY && cy <= maxY) {
+          result.push({ plateId: plate.id, wellId: well.id });
+        }
+      }
+    }
+  }
+  return result;
+}
+
+function getDestAddresses(step: ProtocolStep): WellAddress[] {
+  return step.destAddresses && step.destAddresses.length > 0
+    ? step.destAddresses
+    : [step.destAddress];
+}
+
+function volumePerDest(step: ProtocolStep, numDests: number): number {
+  return step.volumeMode === 'distribute' ? step.volume / numDests : step.volume;
+}
+
+function totalVolumeForStep(step: ProtocolStep, numDests: number): number {
+  return step.volumeMode === 'distribute' ? step.volume : step.volume * numDests;
+}
+
 const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
-  { plates, selectedPlateId, animatingStepIndex, darkMode, onPlateSelect, onPlateDrop, onWellClick },
+  {
+    plates, selectedPlateId, selectedWells, animatingStepIndex,
+    darkMode, onPlateSelect, onPlateDrop, onWellClick, onWellsSelect,
+  },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [size, setSize] = useState({ width: 800, height: 600 });
+  const [size,       setSize      ] = useState({ width: 800, height: 600 });
+  const [rubberBand, setRubberBand] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
 
-  // Map from "plateId:wellId" → Konva Circle node, populated via ref callbacks.
-  const wellRefs    = useRef<Map<string, Konva.Circle>>(new Map());
-  const pipetteRef  = useRef<Konva.Group>(null);
-  // Flip to true to abort a running animation between steps.
-  const cancelledRef = useRef(false);
+  const wellRefs              = useRef<Map<string, Konva.Node>>(new Map());
+  const pipetteRef            = useRef<Konva.Group>(null);
+  const cancelledRef          = useRef(false);
+  const dragStartPos          = useRef<{ x: number; y: number } | null>(null);
+  const isDraggingRubber      = useRef(false);
+  const justFinishedRubberBand = useRef(false);
+
+  // Build a Set of selected well IDs per plate for fast lookup in PlateComponent
+  const selectedWellIdsByPlate = useRef<Map<string, Set<string>>>(new Map());
+  for (const [plateId, set] of selectedWellIdsByPlate.current) {
+    set.clear();
+    void plateId;
+  }
+  selectedWellIdsByPlate.current.clear();
+  for (const addr of selectedWells) {
+    let set = selectedWellIdsByPlate.current.get(addr.plateId);
+    if (!set) { set = new Set(); selectedWellIdsByPlate.current.set(addr.plateId, set); }
+    set.add(addr.wellId);
+  }
 
   useEffect(() => {
     const el = containerRef.current;
@@ -68,11 +131,10 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
 
   // ── Pipette animation helpers ──────────────────────────────────────────────
 
-  /** Move the pipette to (x, y) on the canvas, stopping just above the well. */
   async function movePipetteTo(x: number, y: number): Promise<void> {
     const pip = pipetteRef.current;
     if (!pip) return;
-    await tweenTo(pip, { x, y: y - 18 }, DUR_TRAVEL); // 18px above well center
+    await tweenTo(pip, { x, y: y - 18 }, DUR_TRAVEL);
   }
 
   async function returnPipetteHome(): Promise<void> {
@@ -81,14 +143,63 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     await tweenTo(pip, { x: HOME_X, y: HOME_Y }, DUR_RETURN);
   }
 
-  /**
-   * Animate a well's fill color from its current color to `targetColor`.
-   * The React state update happens *after* the tween so there's no visual jump.
-   */
   async function animateWellColor(plateId: string, wellId: string, targetColor: string): Promise<void> {
     const node = wellRefs.current.get(`${plateId}:${wellId}`);
     if (!node) return;
     await tweenTo(node, { fill: targetColor }, DUR_COLOR);
+  }
+
+  // ── Rubber-band handlers ───────────────────────────────────────────────────
+
+  function handleStageMouseDown(e: Konva.KonvaEventObject<MouseEvent>) {
+    if (!(e.target instanceof Konva.Stage)) return;
+    if (animatingStepIndex >= 0) return;
+    const pos = e.target.getPointerPosition();
+    if (!pos) return;
+    dragStartPos.current = pos;
+    isDraggingRubber.current = false;
+  }
+
+  function handleStageMouseMove(e: Konva.KonvaEventObject<MouseEvent>) {
+    if (!dragStartPos.current) return;
+    const stage = e.target instanceof Konva.Stage ? e.target : e.target.getStage();
+    const pos = stage?.getPointerPosition();
+    if (!pos) return;
+    const dx = Math.abs(pos.x - dragStartPos.current.x);
+    const dy = Math.abs(pos.y - dragStartPos.current.y);
+    if (dx > 4 || dy > 4) {
+      isDraggingRubber.current = true;
+      setRubberBand({ x1: dragStartPos.current.x, y1: dragStartPos.current.y, x2: pos.x, y2: pos.y });
+    }
+  }
+
+  function handleStageMouseUp(e: Konva.KonvaEventObject<MouseEvent>) {
+    if (isDraggingRubber.current) {
+      const stage = e.target instanceof Konva.Stage ? e.target : e.target.getStage();
+      const pos = stage?.getPointerPosition();
+      const finalRect = rubberBand
+        ? { ...rubberBand, x2: pos?.x ?? rubberBand.x2, y2: pos?.y ?? rubberBand.y2 }
+        : null;
+      if (finalRect) {
+        const selected = computeWellsInRect(plates, finalRect);
+        onWellsSelect(selected);
+      }
+      justFinishedRubberBand.current = true;
+    }
+    dragStartPos.current   = null;
+    isDraggingRubber.current = false;
+    setRubberBand(null);
+  }
+
+  function handleStageClick(e: Konva.KonvaEventObject<MouseEvent>) {
+    if (justFinishedRubberBand.current) {
+      justFinishedRubberBand.current = false;
+      return;
+    }
+    if (e.target instanceof Konva.Stage) {
+      onPlateSelect(null);
+      onWellsSelect([]);
+    }
   }
 
   // ── Imperative handle ──────────────────────────────────────────────────────
@@ -101,7 +212,7 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     async runAnimation(steps, initialPlates, onStepStart, onPlatesUpdate, onDone) {
       cancelledRef.current = false;
 
-      let   currentPlates = initialPlates.map(p => ({
+      let currentPlates  = initialPlates.map(p => ({
         ...p,
         wells: p.wells.map(r => r.map(w => ({ ...w }))),
       }));
@@ -114,58 +225,59 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
       for (let i = 0; i < steps.length; i++) {
         if (cancelledRef.current) break;
 
-        const step = steps[i];
+        const step     = steps[i];
         onStepStart(i);
 
         if (step.pipetteId !== lastPip) { tipChanges++; lastPip = step.pipetteId; }
 
-        // ── Find source well ──
-        const srcPos  = getWellCanvasPosition(currentPlates, step.sourceAddress);
+        const dests     = getDestAddresses(step);
+        const numDests  = dests.length;
+        const perDest   = volumePerDest(step, numDests);
+        const totalVol  = totalVolumeForStep(step, numDests);
+
+        // ── Source ──
+        const srcPos   = getWellCanvasPosition(currentPlates, step.sourceAddress);
         const srcPlate = currentPlates.find(p => p.id === step.sourceAddress.plateId);
         const srcWell  = srcPlate?.wells.flat().find(w => w.id === step.sourceAddress.wellId);
+        const srcIsReservoir = srcWell ? srcWell.maxVolume >= RESERVOIR_MAX_VOLUME : false;
 
-        // ── 1. Move pipette to source ──
         if (srcPos) await movePipetteTo(srcPos.x, srcPos.y);
-        await wait(180); // aspirate pause
+        await wait(180);
 
-        // ── 2. Animate source well emptying ──
-        if (srcWell && srcPlate) {
-          const afterVolume  = srcWell.volume - step.volume;
-          const targetColor  = getColorForVolume(
-            Math.max(0, afterVolume),
-            srcWell.maxVolume,
-            srcWell.liquidType,
-          );
+        if (srcWell && srcPlate && !srcIsReservoir) {
+          const afterVol   = Math.max(0, srcWell.volume - totalVol);
+          const targetColor = getColorForVolume(afterVol, srcWell.maxVolume, srcWell.liquidType);
           await animateWellColor(step.sourceAddress.plateId, step.sourceAddress.wellId, targetColor);
         }
 
         if (cancelledRef.current) break;
 
-        // ── Find destination well ──
-        const dstPos   = getWellCanvasPosition(currentPlates, step.destAddress);
-        const dstPlate = currentPlates.find(p => p.id === step.destAddress.plateId);
-        const dstWell  = dstPlate?.wells.flat().find(w => w.id === step.destAddress.wellId);
+        // ── Destinations ──
+        for (const destAddr of dests) {
+          if (cancelledRef.current) break;
 
-        // ── 3. Move pipette to destination ──
-        if (dstPos) await movePipetteTo(dstPos.x, dstPos.y);
-        await wait(180); // dispense pause
+          const dstPos   = getWellCanvasPosition(currentPlates, destAddr);
+          const dstPlate = currentPlates.find(p => p.id === destAddr.plateId);
+          const dstWell  = dstPlate?.wells.flat().find(w => w.id === destAddr.wellId);
 
-        // ── 4. Animate destination well filling ──
-        if (dstWell && dstPlate) {
-          const afterVolume = dstWell.volume + step.volume;
-          // Use the incoming liquid type for the destination color
-          const liquidType  = step.liquidType as LiquidCategory;
-          const targetColor = getColorForVolume(afterVolume, dstWell.maxVolume, liquidType);
-          await animateWellColor(step.destAddress.plateId, step.destAddress.wellId, targetColor);
+          if (dstPos) await movePipetteTo(dstPos.x, dstPos.y);
+          await wait(180);
+
+          if (dstWell && dstPlate) {
+            const afterVol   = dstWell.volume + perDest;
+            const liquidType = step.liquidType as LiquidCategory;
+            const targetColor = getColorForVolume(afterVol, dstWell.maxVolume, liquidType);
+            await animateWellColor(destAddr.plateId, destAddr.wellId, targetColor);
+          }
         }
 
-        // ── 5. Apply the step to React state so volumes update ──
-        currentPlates = applyStep(currentPlates, step);
-        totalVolume    += step.volume;
+        if (cancelledRef.current) break;
+
+        currentPlates  = applyStep(currentPlates, step);
+        totalVolume   += totalVol;
         completedSteps += 1;
         onPlatesUpdate([...currentPlates]);
 
-        // ── 6. Return pipette home ──
         await returnPipetteHome();
       }
 
@@ -186,7 +298,7 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
-  const handleWellRef = (plateId: string, wellId: string, node: Konva.Circle) => {
+  const handleWellRef = (plateId: string, wellId: string, node: Konva.Node) => {
     wellRefs.current.set(`${plateId}:${wellId}`, node);
   };
 
@@ -204,9 +316,10 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
       <Stage
         width={size.width}
         height={size.height}
-        onClick={(e: Konva.KonvaEventObject<MouseEvent>) => {
-          if (e.target instanceof Konva.Stage) onPlateSelect(null);
-        }}
+        onMouseDown={handleStageMouseDown}
+        onMouseMove={handleStageMouseMove}
+        onMouseUp={handleStageMouseUp}
+        onClick={handleStageClick}
       >
         {/* ── Grid layer (non-interactive) ── */}
         <Layer listening={false}>
@@ -237,6 +350,7 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
               plate={plate}
               isSelected={plate.id === selectedPlateId}
               animating={animatingStepIndex >= 0}
+              selectedWellIds={selectedWellIdsByPlate.current.get(plate.id) ?? new Set()}
               onClick={onPlateSelect}
               onDragEnd={handleDragEnd}
               onWellClick={onWellClick}
@@ -245,14 +359,25 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
           ))}
         </Layer>
 
+        {/* ── Rubber-band selection layer ── */}
+        <Layer listening={false}>
+          {rubberBand && (
+            <Rect
+              x={Math.min(rubberBand.x1, rubberBand.x2)}
+              y={Math.min(rubberBand.y1, rubberBand.y2)}
+              width={Math.abs(rubberBand.x2 - rubberBand.x1)}
+              height={Math.abs(rubberBand.y2 - rubberBand.y1)}
+              fill="rgba(99,102,241,0.08)"
+              stroke="#6366f1"
+              strokeWidth={1}
+              dash={[5, 3]}
+            />
+          )}
+        </Layer>
+
         {/* ── Pipette layer (always on top) ── */}
         <Layer listening={false}>
-          {/*
-            Pipette visual: barrel (rect) + downward-pointing tip (triangle).
-            The Group's (x,y) is the tip point; the barrel hangs above it.
-          */}
           <Group ref={pipetteRef} x={HOME_X} y={HOME_Y} visible={animatingStepIndex >= 0}>
-            {/* Barrel */}
             <Rect
               x={-5}
               y={-30}
@@ -262,7 +387,6 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
               cornerRadius={2}
               opacity={0.9}
             />
-            {/* Tip triangle — points down to (0,0) */}
             <Line
               points={[-5, -4, 5, -4, 0, 4]}
               closed={true}
@@ -271,7 +395,6 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
               strokeWidth={0.5}
               opacity={0.9}
             />
-            {/* Highlight dot to show it's a liquid handler */}
             <KonvaCircle x={0} y={-20} radius={2.5} fill="#c7d2fe" opacity={0.8} />
           </Group>
         </Layer>

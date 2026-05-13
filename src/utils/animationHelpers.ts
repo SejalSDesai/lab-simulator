@@ -40,7 +40,6 @@ export function getColorForVolume(
   if (volume <= 0) return EMPTY_COLOR;
   const ratio     = Math.min(volume / maxVolume, 1);
   const baseColor = LIQUID_COLORS[liquidType];
-  // At low volume: blend from white-tinted base; at full: pure base color.
   const lightTint = interpolateColor('#ffffff', baseColor, 0.3);
   return interpolateColor(lightTint, baseColor, ratio);
 }
@@ -58,6 +57,18 @@ export function getWellCanvasPosition(
   const plate = plates.find(p => p.id === address.plateId);
   if (!plate) return null;
 
+  // Reservoir: single trough — return its visual center
+  if (plate.type === 'reservoir') {
+    const config = PLATE_CONFIGS[plate.type];
+    const fw     = config.fixedWidth  ?? 200;
+    const fh     = config.fixedHeight ?? 90;
+    return {
+      x: plate.x + fw / 2,
+      y: plate.y + PLATE_LABEL_HEIGHT + PLATE_PADDING +
+         (fh - PLATE_LABEL_HEIGHT - PLATE_PADDING * 2) / 2,
+    };
+  }
+
   const config = PLATE_CONFIGS[plate.type];
   let target: Well | null = null;
   for (const row of plate.wells) {
@@ -74,8 +85,6 @@ export function getWellCanvasPosition(
 
 // ─── Tween helpers ────────────────────────────────────────────────────────────
 
-// `node.to()` accepts AnimTo (NodeConfig + duration/onFinish) but Konva's types
-// omit `easing`, so we widen via a cast for the call site only.
 type KonvaTweenConfig = Konva.NodeConfig & {
   duration?: number;
   easing?: (t: number, b: number, c: number, d: number) => number;
