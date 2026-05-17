@@ -262,9 +262,10 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
   // ── Rubber-band handlers ───────────────────────────────────────────────────
 
   function handleStageMouseDown(e: Konva.KonvaEventObject<MouseEvent>) {
-    if (!(e.target instanceof Konva.Stage)) return;
+    if (e.target instanceof Konva.Circle) return; // well clicks handled by PlateComponent
     if (animatingStepIndex >= 0) return;
-    const pos = e.target.getPointerPosition();
+    const stage = e.target instanceof Konva.Stage ? e.target : e.target.getStage();
+    const pos = stage?.getPointerPosition();
     if (!pos) return;
     dragStartPos.current = pos;
     isDraggingRubber.current = false;
@@ -278,6 +279,10 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     const dx = Math.abs(pos.x - dragStartPos.current.x);
     const dy = Math.abs(pos.y - dragStartPos.current.y);
     if (dx > 4 || dy > 4) {
+      if (!isDraggingRubber.current) {
+        // cancel any concurrent plate drag so rubber-band takes exclusive control
+        (Konva as any).DD?.node?.stopDrag?.();
+      }
       isDraggingRubber.current = true;
       setRubberBand({ x1: dragStartPos.current.x, y1: dragStartPos.current.y, x2: pos.x, y2: pos.y });
     }

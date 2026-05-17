@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import type { Plate, Pipette, WellAddress, LiquidCategory } from '../types';
 import {
   PLATE_CONFIGS, PIPETTE_PRESETS, LIQUID_COLORS, RESERVOIR_MAX_VOLUME,
@@ -17,6 +17,7 @@ interface SidebarProps {
   onAddPlate: (type: PlateType) => void;
   onSelectPipette: (pipetteId: string) => void;
   onSetWellLiquid: (address: WellAddress, volume: number, liquid: LiquidCategory) => void;
+  onSetWellsLiquid: (addresses: WellAddress[], volume: number, liquid: LiquidCategory) => void;
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -69,25 +70,115 @@ export default function Sidebar({
   onAddPlate,
   onSelectPipette,
   onSetWellLiquid,
+  onSetWellsLiquid,
 }: SidebarProps) {
   const [wellVolume, setWellVolume] = useState(100);
   const [wellLiquid, setWellLiquid] = useState<LiquidCategory>('sample');
 
-  const selectedPlate  = selectedWell ? plates.find(p => p.id === selectedWell.plateId) : null;
-  const currentWell    = selectedPlate ? selectedPlate.wells.flat().find(w => w.id === selectedWell?.wellId) : null;
-  const isReservoir    = currentWell ? currentWell.maxVolume >= RESERVOIR_MAX_VOLUME : false;
+  const selectedPlate = selectedWell ? plates.find(p => p.id === selectedWell.plateId) : null;
+  const currentWell   = selectedPlate ? selectedPlate.wells.flat().find(w => w.id === selectedWell?.wellId) : null;
+  const isReservoir   = currentWell ? currentWell.maxVolume >= RESERVOIR_MAX_VOLUME : false;
   const pipettes: Pipette[] = PIPETTE_PRESETS;
 
+  // Sync form state when the selected well changes
+  useEffect(() => {
+    if (currentWell && !isReservoir) {
+      setWellVolume(currentWell.volume > 0 ? currentWell.volume : 100);
+      if (currentWell.liquidType !== 'empty') setWellLiquid(currentWell.liquidType as LiquidCategory);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedWell?.wellId, selectedWell?.plateId]);
+
   const inputCls = 'w-full text-xs border border-gray-300 dark:border-gray-600 rounded-lg px-2 py-1.5 bg-white dark:bg-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-indigo-400/50 transition-shadow';
+
+  const hasSelection  = selectedWells.length > 0;
+  const isMultiSelect = selectedWells.length > 1;
 
   return (
     <aside className="w-56 shrink-0 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 overflow-y-auto flex flex-col text-sm text-gray-700 dark:text-gray-300">
 
-      {/* Multi-well selection badge */}
-      {selectedWells.length > 1 && (
-        <div className="mx-3 mt-3 px-3 py-2 bg-indigo-50 dark:bg-indigo-900/20 rounded-lg border border-indigo-200 dark:border-indigo-700 text-xs text-indigo-700 dark:text-indigo-300 font-semibold">
-          {selectedWells.length} wells selected
-        </div>
+      {/* ── Well editor (shown at top when wells are selected) ── */}
+      {hasSelection && (
+        <Section title={isMultiSelect ? `${selectedWells.length} Wells Selected` : 'Well Editor'}>
+          <div className="px-3 space-y-2">
+
+            {/* Single-well info */}
+            {!isMultiSelect && currentWell && (
+              <div className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
+                <span className="font-semibold text-gray-700 dark:text-gray-300">
+                  {selectedPlate?.name} · {selectedWell?.wellId}
+                </span>
+                <div className="mt-0.5">
+                  {isReservoir
+                    ? 'Volume: ∞ (unlimited)'
+                    : `${currentWell.volume} / ${currentWell.maxVolume} µL`}
+                </div>
+                {currentWell.volume > 0 && (
+                  <div className="flex items-center gap-1.5 mt-0.5">
+                    <span
+                      className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
+                      style={{ background: LIQUID_COLORS[currentWell.liquidType] }}
+                    />
+                    <span className="capitalize">{currentWell.liquidType}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Multi-well info */}
+            {isMultiSelect && (
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                Set the same liquid and volume for all {selectedWells.length} selected wells at once.
+              </p>
+            )}
+
+            <select
+              value={wellLiquid}
+              onChange={e => setWellLiquid(e.target.value as LiquidCategory)}
+              className={inputCls}
+            >
+              {LIQUID_OPTIONS.map(l => <option key={l} value={l}>{l}</option>)}
+            </select>
+
+            {(isMultiSelect || !isReservoir) && (
+              <input
+                type="number"
+                min={0}
+                value={wellVolume}
+                onChange={e => setWellVolume(Number(e.target.value))}
+                className={inputCls}
+                placeholder="Volume (µL)"
+              />
+            )}
+
+            <div className="flex gap-1.5">
+              <button
+                onClick={() => {
+                  if (isMultiSelect) {
+                    onSetWellsLiquid(selectedWells, wellVolume, wellLiquid);
+                  } else if (selectedWell) {
+                    onSetWellLiquid(selectedWell, isReservoir ? RESERVOIR_MAX_VOLUME : wellVolume, wellLiquid);
+                  }
+                }}
+                className="flex-1 px-2 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg transition-colors"
+              >
+                {isMultiSelect ? 'Set All' : isReservoir ? 'Set Liquid' : 'Set'}
+              </button>
+              <button
+                onClick={() => {
+                  if (isMultiSelect) {
+                    onSetWellsLiquid(selectedWells, 0, 'empty');
+                  } else if (selectedWell) {
+                    onSetWellLiquid(selectedWell, 0, 'empty');
+                  }
+                }}
+                className="flex-1 px-2 py-1.5 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300 text-xs font-medium rounded-lg transition-colors"
+              >
+                {isMultiSelect ? 'Clear All' : 'Clear'}
+              </button>
+            </div>
+          </div>
+        </Section>
       )}
 
       {/* Plate library */}
@@ -142,68 +233,6 @@ export default function Sidebar({
           ))}
         </div>
       </Section>
-
-      {/* Well editor */}
-      {selectedWell && currentWell && (
-        <Section title="Well Editor">
-          <div className="px-3 space-y-2">
-            <div className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
-              <span className="font-semibold text-gray-700 dark:text-gray-300">
-                {selectedPlate?.name} · {selectedWell.wellId}
-              </span>
-              <div className="mt-0.5">
-                {isReservoir
-                  ? 'Volume: ∞ (unlimited)'
-                  : `${currentWell.volume} / ${currentWell.maxVolume} µL`}
-              </div>
-              {currentWell.volume > 0 && (
-                <div className="flex items-center gap-1.5 mt-0.5">
-                  <span
-                    className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
-                    style={{ background: LIQUID_COLORS[currentWell.liquidType] }}
-                  />
-                  <span className="capitalize">{currentWell.liquidType}</span>
-                </div>
-              )}
-            </div>
-
-            <select
-              value={wellLiquid}
-              onChange={e => setWellLiquid(e.target.value as LiquidCategory)}
-              className={inputCls}
-            >
-              {LIQUID_OPTIONS.map(l => <option key={l} value={l}>{l}</option>)}
-            </select>
-
-            {!isReservoir && (
-              <input
-                type="number"
-                min={0}
-                max={currentWell.maxVolume}
-                value={wellVolume}
-                onChange={e => setWellVolume(Number(e.target.value))}
-                className={inputCls}
-                placeholder={`Volume (max ${currentWell.maxVolume} µL)`}
-              />
-            )}
-
-            <div className="flex gap-1.5">
-              <button
-                onClick={() => onSetWellLiquid(selectedWell, isReservoir ? RESERVOIR_MAX_VOLUME : wellVolume, wellLiquid)}
-                className="flex-1 px-2 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg transition-colors"
-              >
-                {isReservoir ? 'Set Liquid' : 'Set'}
-              </button>
-              <button
-                onClick={() => onSetWellLiquid(selectedWell, 0, 'empty')}
-                className="flex-1 px-2 py-1.5 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300 text-xs font-medium rounded-lg transition-colors"
-              >
-                Clear
-              </button>
-            </div>
-          </div>
-        </Section>
-      )}
 
       {/* Liquid legend */}
       <Section title="Liquid Colors">

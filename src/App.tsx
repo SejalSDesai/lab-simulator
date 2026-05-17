@@ -50,8 +50,9 @@ export default function App() {
   const [plates,            setPlates           ] = useState<Plate[]>([]);
   const [protocol,          setProtocol         ] = useState<Protocol>(defaultProtocol);
   const [selectedPlateId,   setSelectedPlateId  ] = useState<string | null>(null);
-  const [selectedWell,      setSelectedWell     ] = useState<WellAddress | null>(null);
   const [selectedWells,     setSelectedWells    ] = useState<WellAddress[]>([]);
+  // Derived: single-well editor shows only when exactly 1 well is selected
+  const selectedWell = selectedWells.length === 1 ? selectedWells[0] : null;
   const [selectedPipetteId, setSelectedPipetteId] = useState(PIPETTE_PRESETS[1].id);
   const [darkMode,          setDarkMode         ] = useState(false);
   const [toasts,            setToasts           ] = useState<ToastMessage[]>([]);
@@ -83,12 +84,10 @@ export default function App() {
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedPlateId) {
         setPlates(prev => prev.filter(p => p.id !== selectedPlateId));
         setSelectedPlateId(null);
-        setSelectedWell(null);
         setSelectedWells([]);
       }
       if (e.key === 'Escape') {
         setSelectedPlateId(null);
-        setSelectedWell(null);
         setSelectedWells([]);
         setShowImporter(false);
         setShowReview(false);
@@ -127,7 +126,6 @@ export default function App() {
           : [...prev, address];
       });
     } else {
-      setSelectedWell(address);
       setSelectedWells([address]);
       setSelectedPlateId(plateId);
     }
@@ -135,7 +133,6 @@ export default function App() {
 
   const handleWellsSelect = (wells: WellAddress[]) => {
     setSelectedWells(wells);
-    if (wells.length === 1) setSelectedWell(wells[0]);
   };
 
   const handleSetWellLiquid = (address: WellAddress, volume: number, liquid: LiquidCategory) => {
@@ -150,6 +147,20 @@ export default function App() {
         )),
       };
     }));
+  };
+
+  const handleSetWellsLiquid = (addresses: WellAddress[], volume: number, liquid: LiquidCategory) => {
+    setPlates(prev => prev.map(plate => ({
+      ...plate,
+      wells: plate.wells.map(row => row.map(well => {
+        if (!addresses.some(a => a.plateId === plate.id && a.wellId === well.id)) return well;
+        return {
+          ...well,
+          volume:    liquid === 'empty' ? 0 : Math.min(Math.max(0, volume), well.maxVolume),
+          liquidType: liquid,
+        };
+      })),
+    })));
   };
 
   // ── Simulation ────────────────────────────────────────────────────
@@ -238,7 +249,6 @@ export default function App() {
   const handleClear = () => {
     setPlates([]);
     setSelectedPlateId(null);
-    setSelectedWell(null);
     setSelectedWells([]);
     setSimResult(null);
   };
@@ -381,6 +391,7 @@ export default function App() {
           onAddPlate={handleAddPlate}
           onSelectPipette={setSelectedPipetteId}
           onSetWellLiquid={handleSetWellLiquid}
+          onSetWellsLiquid={handleSetWellsLiquid}
         />
 
         <Canvas
@@ -390,7 +401,7 @@ export default function App() {
           selectedWells={selectedWells}
           animatingStepIndex={animatingStep}
           darkMode={darkMode}
-          onPlateSelect={id => { setSelectedPlateId(id); if (id === null) setSelectedWell(null); }}
+          onPlateSelect={id => { setSelectedPlateId(id); if (id === null) setSelectedWells([]); }}
           onPlateDrop={handlePlateDrop}
           onWellClick={handleWellClick}
           onWellsSelect={handleWellsSelect}
