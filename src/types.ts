@@ -26,13 +26,17 @@ export interface Pipette {
   name: string;
   minVolume: number;
   maxVolume: number;
-  channels: 1 | 8 | 96;
+  channels: 1 | 8 | 12 | 96;
+  tipCount: number;
 }
 
 export interface WellAddress {
   plateId: string;
   wellId: string;
 }
+
+/** How wells are selected for a multi-channel step. */
+export type SelectionMode = 'individual' | 'column' | 'row';
 
 export interface ProtocolStep {
   id: string;
@@ -45,6 +49,16 @@ export interface ProtocolStep {
   volume: number;
   pipetteId: string;
   liquidType: LiquidCategory;
+  /** How source/dest wells were selected. Defaults to 'individual' when absent. */
+  selectionMode?: SelectionMode;
+  /** Starting column (1-based) for 'column' mode source. */
+  sourceColumn?: number;
+  /** Starting column (1-based) for 'column' mode destination. */
+  destColumn?: number;
+  /** Starting row letter (e.g. 'A') for 'row' mode source. */
+  sourceRow?: string;
+  /** Starting row letter (e.g. 'A') for 'row' mode destination. */
+  destRow?: string;
 }
 
 export interface Protocol {
@@ -121,8 +135,9 @@ export const LIQUID_COLORS: Record<LiquidCategory, string> = {
 };
 
 export const PIPETTE_PRESETS: Pipette[] = [
-  { id: 'p20',      name: 'P20 (1–20 µL)',         minVolume: 1,   maxVolume: 20,   channels: 1 },
-  { id: 'p200',     name: 'P200 (20–200 µL)',       minVolume: 20,  maxVolume: 200,  channels: 1 },
-  { id: 'p1000',    name: 'P1000 (100–1000 µL)',    minVolume: 100, maxVolume: 1000, channels: 1 },
-  { id: 'p300-8ch', name: 'P300 8-ch (20–300 µL)', minVolume: 20,  maxVolume: 300,  channels: 8  },
+  { id: 'p20',       name: 'P20 (1–20 µL)',          minVolume: 1,   maxVolume: 20,   channels: 1,  tipCount: 1  },
+  { id: 'p200',      name: 'P200 (20–200 µL)',        minVolume: 20,  maxVolume: 200,  channels: 1,  tipCount: 1  },
+  { id: 'p1000',     name: 'P1000 (100–1000 µL)',     minVolume: 100, maxVolume: 1000, channels: 1,  tipCount: 1  },
+  { id: 'p300-8ch',  name: 'P300 8-ch (20–300 µL)',  minVolume: 20,  maxVolume: 300,  channels: 8,  tipCount: 8  },
+  { id: 'p300-12ch', name: 'P300 12-ch (20–300 µL)', minVolume: 20,  maxVolume: 300,  channels: 12, tipCount: 12 },
 ];
