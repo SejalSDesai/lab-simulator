@@ -21,6 +21,7 @@ interface ProtocolBuilderProps {
   simResult: SimulationResult | null;
   darkMode: boolean;
   onProtocolChange: (protocol: Protocol) => void;
+  onClearSimResult: () => void;
 }
 
 interface StepFormState {
@@ -69,6 +70,7 @@ export default function ProtocolBuilder({
   simResult,
   darkMode: _darkMode,
   onProtocolChange,
+  onClearSimResult,
 }: ProtocolBuilderProps) {
   const [form, setForm] = useState<StepFormState>({
     ...DEFAULT_FORM,
@@ -78,9 +80,90 @@ export default function ProtocolBuilder({
   });
   const [formError, setFormError] = useState('');
 
+  // ── Edit panel state ──────────────────────────────────────────────
+  const [editingStepIndex, setEditingStepIndex] = useState<number | null>(null);
+  const [editForm, setEditForm] = useState<StepFormState>(DEFAULT_FORM);
+  const [editFieldErrors, setEditFieldErrors] = useState<Record<string, string>>({});
+
   const updateField = <K extends keyof StepFormState>(key: K, value: StepFormState[K]) => {
     setForm(prev => ({ ...prev, [key]: value }));
     setFormError('');
+  };
+
+  const updateEditField = <K extends keyof StepFormState>(key: K, value: StepFormState[K]) => {
+    setEditForm(prev => ({ ...prev, [key]: value }));
+    setEditFieldErrors(prev => ({ ...prev, [key]: '' }));
+  };
+
+  const openEdit = (step: ProtocolStep, idx: number) => {
+    setEditingStepIndex(idx);
+    setEditFieldErrors({});
+    setEditForm({
+      srcPlateId: step.sourceAddress.plateId,
+      srcWellId:  step.sourceAddress.wellId,
+      dstPlateId: step.destAddress.plateId,
+      dstWellId:  step.destAddress.wellId,
+      volume:     String(step.volume),
+      pipetteId:  step.pipetteId,
+      liquidType: step.liquidType,
+      volumeMode: step.volumeMode ?? 'each',
+    });
+  };
+
+  const closeEdit = () => {
+    setEditingStepIndex(null);
+    setEditFieldErrors({});
+  };
+
+  const handleEditSave = () => {
+    if (editingStepIndex === null) return;
+
+    const errs: Record<string, string> = {};
+
+    const srcPlate = getPlateById(plates, editForm.srcPlateId);
+    if (!srcPlate) {
+      errs.srcPlateId = 'Select a source plate.';
+    } else if (!editForm.srcWellId || !isValidWellId(editForm.srcWellId.toUpperCase(), srcPlate)) {
+      errs.srcWellId = `"${editForm.srcWellId}" is not a valid well in ${srcPlate.name}.`;
+    }
+
+    const volume = parseFloat(editForm.volume);
+    if (isNaN(volume) || volume <= 0) {
+      errs.volume = 'Volume must be a positive number.';
+    } else {
+      const pipette = PIPETTE_PRESETS.find(p => p.id === editForm.pipetteId);
+      if (pipette && (volume < pipette.minVolume || volume > pipette.maxVolume)) {
+        errs.volume = `${volume} µL is outside ${pipette.name} range (${pipette.minVolume}–${pipette.maxVolume} µL).`;
+      }
+    }
+
+    const dstPlate = getPlateById(plates, editForm.dstPlateId);
+    if (!dstPlate) {
+      errs.dstPlateId = 'Select a destination plate.';
+    } else if (!editForm.dstWellId || !isValidWellId(editForm.dstWellId.toUpperCase(), dstPlate)) {
+      errs.dstWellId = `"${editForm.dstWellId}" is not a valid well in ${dstPlate.name}.`;
+    }
+
+    if (Object.values(errs).some(Boolean)) {
+      setEditFieldErrors(errs);
+      return;
+    }
+
+    const originalStep = protocol.steps[editingStepIndex];
+    const updatedStep: ProtocolStep = {
+      ...originalStep,
+      sourceAddress: { plateId: editForm.srcPlateId, wellId: editForm.srcWellId.toUpperCase() },
+      destAddress:   { plateId: editForm.dstPlateId, wellId: editForm.dstWellId.toUpperCase() },
+      volume,
+      pipetteId:     editForm.pipetteId,
+      liquidType:    editForm.liquidType,
+      volumeMode:    editForm.volumeMode,
+    };
+
+    const updatedSteps = protocol.steps.map((s, i) => i === editingStepIndex ? updatedStep : s);
+    onProtocolChange({ ...protocol, steps: updatedSteps, updatedAt: new Date().toISOString() });
+    onClearSimResult();
+    closeEdit();
   };
 
   const isMultiDest = selectedWells.length > 1;
@@ -144,8 +227,11 @@ export default function ProtocolBuilder({
     'w-full text-xs border border-gray-300 dark:border-gray-600 rounded px-2 py-1.5 bg-white dark:bg-gray-700 dark:text-gray-200 focus:outline-none focus:ring-1 focus:ring-indigo-400';
   const labelCls = 'block text-xs text-gray-500 dark:text-gray-400 mb-0.5';
 
+  const editingSrcMissing = editingStepIndex !== null && !plates.find(p => p.id === editForm.srcPlateId);
+  const editingDstMissing = editingStepIndex !== null && !plates.find(p => p.id === editForm.dstPlateId);
+
   return (
-    <aside className="w-72 shrink-0 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 flex flex-col text-sm text-gray-700 dark:text-gray-300 overflow-hidden">
+    <aside className="relative w-72 shrink-0 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 flex flex-col text-sm text-gray-700 dark:text-gray-300 overflow-hidden">
       {/* Header */}
       <div className="px-3 py-2 border-b border-gray-200 dark:border-gray-700 shrink-0">
         <h2 className="font-semibold text-gray-800 dark:text-gray-200">Protocol Builder</h2>
@@ -182,13 +268,23 @@ export default function ProtocolBuilder({
                 <span className="flex-1 leading-relaxed break-all">
                   {stepDescription(step, plates)}
                 </span>
-                <button
-                  onClick={() => removeStep(step.id)}
-                  className="shrink-0 text-gray-300 hover:text-red-500 transition-colors text-base leading-none"
-                  title="Delete step"
-                >
-                  ×
-                </button>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    onClick={() => openEdit(step, idx)}
+                    disabled={animatingStep >= 0}
+                    className="text-gray-300 hover:text-indigo-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors text-sm leading-none"
+                    title="Edit step"
+                  >
+                    ✎
+                  </button>
+                  <button
+                    onClick={() => removeStep(step.id)}
+                    className="text-gray-300 hover:text-red-500 transition-colors text-base leading-none"
+                    title="Delete step"
+                  >
+                    ×
+                  </button>
+                </div>
               </div>
 
               <div className="flex items-center gap-2 mt-1 text-gray-400 dark:text-gray-500">
@@ -360,6 +456,171 @@ export default function ProtocolBuilder({
           + Add Step
         </button>
       </div>
+
+      {/* ── Edit Step Panel ─────────────────────────────────────────── */}
+      {editingStepIndex !== null && (
+        <div className="absolute inset-0 z-10 flex flex-col bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700">
+          {/* Header */}
+          <div className="px-3 py-2 border-b border-gray-200 dark:border-gray-700 shrink-0 flex items-center justify-between">
+            <div>
+              <h2 className="font-semibold text-gray-800 dark:text-gray-200">Edit Step {editingStepIndex + 1}</h2>
+              <p className="text-xs text-gray-400 dark:text-gray-500">All changes require Save to apply.</p>
+            </div>
+            <button
+              onClick={closeEdit}
+              className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-lg leading-none"
+              title="Cancel"
+            >
+              ×
+            </button>
+          </div>
+
+          {/* Form body */}
+          <div className="flex-1 overflow-y-auto px-3 py-3 space-y-2">
+
+            {/* Source */}
+            <div className="grid grid-cols-2 gap-1">
+              <div>
+                <label className={labelCls}>Source Plate</label>
+                <select
+                  value={editForm.srcPlateId}
+                  onChange={e => updateEditField('srcPlateId', e.target.value)}
+                  className={`${inputCls} ${editingSrcMissing || editFieldErrors.srcPlateId ? 'border-red-400' : ''}`}
+                >
+                  <option value="">— plate —</option>
+                  {editingSrcMissing && (
+                    <option value={editForm.srcPlateId}>⚠ (plate removed)</option>
+                  )}
+                  {plates.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+                {editingSrcMissing && !editFieldErrors.srcPlateId && (
+                  <p className="text-xs text-amber-500 mt-0.5">Source plate no longer on canvas.</p>
+                )}
+                {editFieldErrors.srcPlateId && (
+                  <p className="text-xs text-red-500 mt-0.5">{editFieldErrors.srcPlateId}</p>
+                )}
+              </div>
+              <div>
+                <label className={labelCls}>Source Well</label>
+                <input
+                  type="text"
+                  placeholder="e.g. A1"
+                  value={editForm.srcWellId}
+                  onChange={e => updateEditField('srcWellId', e.target.value)}
+                  className={`${inputCls} ${editFieldErrors.srcWellId ? 'border-red-400' : ''}`}
+                  maxLength={4}
+                />
+                {editFieldErrors.srcWellId && (
+                  <p className="text-xs text-red-500 mt-0.5">{editFieldErrors.srcWellId}</p>
+                )}
+              </div>
+            </div>
+
+            {/* Destination */}
+            <div className="grid grid-cols-2 gap-1">
+              <div>
+                <label className={labelCls}>Dest Plate</label>
+                <select
+                  value={editForm.dstPlateId}
+                  onChange={e => updateEditField('dstPlateId', e.target.value)}
+                  className={`${inputCls} ${editingDstMissing || editFieldErrors.dstPlateId ? 'border-red-400' : ''}`}
+                >
+                  <option value="">— plate —</option>
+                  {editingDstMissing && (
+                    <option value={editForm.dstPlateId}>⚠ (plate removed)</option>
+                  )}
+                  {plates.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+                {editingDstMissing && !editFieldErrors.dstPlateId && (
+                  <p className="text-xs text-amber-500 mt-0.5">Dest plate no longer on canvas.</p>
+                )}
+                {editFieldErrors.dstPlateId && (
+                  <p className="text-xs text-red-500 mt-0.5">{editFieldErrors.dstPlateId}</p>
+                )}
+              </div>
+              <div>
+                <label className={labelCls}>Dest Well</label>
+                <input
+                  type="text"
+                  placeholder="e.g. B3"
+                  value={editForm.dstWellId}
+                  onChange={e => updateEditField('dstWellId', e.target.value)}
+                  className={`${inputCls} ${editFieldErrors.dstWellId ? 'border-red-400' : ''}`}
+                  maxLength={4}
+                />
+                {editFieldErrors.dstWellId && (
+                  <p className="text-xs text-red-500 mt-0.5">{editFieldErrors.dstWellId}</p>
+                )}
+              </div>
+            </div>
+
+            {/* Volume + liquid */}
+            <div className="grid grid-cols-2 gap-1">
+              <div>
+                <label className={labelCls}>Volume (µL)</label>
+                <input
+                  type="number"
+                  min={0.1}
+                  step={0.1}
+                  value={editForm.volume}
+                  onChange={e => updateEditField('volume', e.target.value)}
+                  className={`${inputCls} ${editFieldErrors.volume ? 'border-red-400' : ''}`}
+                />
+                {editFieldErrors.volume && (
+                  <p className="text-xs text-red-500 mt-0.5">{editFieldErrors.volume}</p>
+                )}
+              </div>
+              <div>
+                <label className={labelCls}>Liquid Type</label>
+                <select
+                  value={editForm.liquidType}
+                  onChange={e => updateEditField('liquidType', e.target.value as LiquidCategory)}
+                  className={inputCls}
+                >
+                  {LIQUID_OPTIONS.map(l => <option key={l} value={l}>{l}</option>)}
+                </select>
+              </div>
+            </div>
+
+            {/* Pipette */}
+            <div>
+              <label className={labelCls}>Pipette</label>
+              <select
+                value={editForm.pipetteId}
+                onChange={e => updateEditField('pipetteId', e.target.value)}
+                className={inputCls}
+              >
+                {PIPETTE_PRESETS.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </div>
+
+            {/* Multi-dest notice */}
+            {protocol.steps[editingStepIndex]?.destAddresses &&
+              (protocol.steps[editingStepIndex].destAddresses?.length ?? 0) > 1 && (
+              <p className="text-xs text-amber-500 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded px-2 py-1.5">
+                This step has multiple destinations. The panel shows the first destination only.
+                Full multi-dest editing will be supported in a future update.
+              </p>
+            )}
+          </div>
+
+          {/* Footer */}
+          <div className="shrink-0 px-3 py-3 border-t border-gray-200 dark:border-gray-700 flex gap-2">
+            <button
+              onClick={handleEditSave}
+              className="flex-1 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded transition-colors"
+            >
+              Save
+            </button>
+            <button
+              onClick={closeEdit}
+              className="flex-1 py-1.5 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 text-xs font-semibold rounded transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </aside>
   );
 }
