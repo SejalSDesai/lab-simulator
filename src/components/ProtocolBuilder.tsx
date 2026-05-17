@@ -21,6 +21,7 @@ interface ProtocolBuilderProps {
   simResult: SimulationResult | null;
   darkMode: boolean;
   onProtocolChange: (protocol: Protocol) => void;
+  onClearSimResult: () => void;
 }
 
 interface StepFormState {
@@ -69,6 +70,7 @@ export default function ProtocolBuilder({
   simResult,
   darkMode: _darkMode,
   onProtocolChange,
+  onClearSimResult,
 }: ProtocolBuilderProps) {
   const [form, setForm] = useState<StepFormState>({
     ...DEFAULT_FORM,
@@ -81,6 +83,7 @@ export default function ProtocolBuilder({
   // ── Edit panel state ──────────────────────────────────────────────
   const [editingStepIndex, setEditingStepIndex] = useState<number | null>(null);
   const [editForm, setEditForm] = useState<StepFormState>(DEFAULT_FORM);
+  const [editFieldErrors, setEditFieldErrors] = useState<Record<string, string>>({});
 
   const updateField = <K extends keyof StepFormState>(key: K, value: StepFormState[K]) => {
     setForm(prev => ({ ...prev, [key]: value }));
@@ -89,10 +92,12 @@ export default function ProtocolBuilder({
 
   const updateEditField = <K extends keyof StepFormState>(key: K, value: StepFormState[K]) => {
     setEditForm(prev => ({ ...prev, [key]: value }));
+    setEditFieldErrors(prev => ({ ...prev, [key]: '' }));
   };
 
   const openEdit = (step: ProtocolStep, idx: number) => {
     setEditingStepIndex(idx);
+    setEditFieldErrors({});
     setEditForm({
       srcPlateId: step.sourceAddress.plateId,
       srcWellId:  step.sourceAddress.wellId,
@@ -105,10 +110,61 @@ export default function ProtocolBuilder({
     });
   };
 
-  const closeEdit = () => setEditingStepIndex(null);
+  const closeEdit = () => {
+    setEditingStepIndex(null);
+    setEditFieldErrors({});
+  };
 
-  // Save logic wired in TASK-002; panel closes on Save for now.
-  const handleEditSave = () => closeEdit();
+  const handleEditSave = () => {
+    if (editingStepIndex === null) return;
+
+    const errs: Record<string, string> = {};
+
+    const srcPlate = getPlateById(plates, editForm.srcPlateId);
+    if (!srcPlate) {
+      errs.srcPlateId = 'Select a source plate.';
+    } else if (!editForm.srcWellId || !isValidWellId(editForm.srcWellId.toUpperCase(), srcPlate)) {
+      errs.srcWellId = `"${editForm.srcWellId}" is not a valid well in ${srcPlate.name}.`;
+    }
+
+    const volume = parseFloat(editForm.volume);
+    if (isNaN(volume) || volume <= 0) {
+      errs.volume = 'Volume must be a positive number.';
+    } else {
+      const pipette = PIPETTE_PRESETS.find(p => p.id === editForm.pipetteId);
+      if (pipette && (volume < pipette.minVolume || volume > pipette.maxVolume)) {
+        errs.volume = `${volume} µL is outside ${pipette.name} range (${pipette.minVolume}–${pipette.maxVolume} µL).`;
+      }
+    }
+
+    const dstPlate = getPlateById(plates, editForm.dstPlateId);
+    if (!dstPlate) {
+      errs.dstPlateId = 'Select a destination plate.';
+    } else if (!editForm.dstWellId || !isValidWellId(editForm.dstWellId.toUpperCase(), dstPlate)) {
+      errs.dstWellId = `"${editForm.dstWellId}" is not a valid well in ${dstPlate.name}.`;
+    }
+
+    if (Object.values(errs).some(Boolean)) {
+      setEditFieldErrors(errs);
+      return;
+    }
+
+    const originalStep = protocol.steps[editingStepIndex];
+    const updatedStep: ProtocolStep = {
+      ...originalStep,
+      sourceAddress: { plateId: editForm.srcPlateId, wellId: editForm.srcWellId.toUpperCase() },
+      destAddress:   { plateId: editForm.dstPlateId, wellId: editForm.dstWellId.toUpperCase() },
+      volume,
+      pipetteId:     editForm.pipetteId,
+      liquidType:    editForm.liquidType,
+      volumeMode:    editForm.volumeMode,
+    };
+
+    const updatedSteps = protocol.steps.map((s, i) => i === editingStepIndex ? updatedStep : s);
+    onProtocolChange({ ...protocol, steps: updatedSteps, updatedAt: new Date().toISOString() });
+    onClearSimResult();
+    closeEdit();
+  };
 
   const isMultiDest = selectedWells.length > 1;
 
@@ -429,7 +485,7 @@ export default function ProtocolBuilder({
                 <select
                   value={editForm.srcPlateId}
                   onChange={e => updateEditField('srcPlateId', e.target.value)}
-                  className={`${inputCls} ${editingSrcMissing ? 'border-amber-400' : ''}`}
+                  className={`${inputCls} ${editingSrcMissing || editFieldErrors.srcPlateId ? 'border-red-400' : ''}`}
                 >
                   <option value="">— plate —</option>
                   {editingSrcMissing && (
@@ -437,8 +493,11 @@ export default function ProtocolBuilder({
                   )}
                   {plates.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
-                {editingSrcMissing && (
+                {editingSrcMissing && !editFieldErrors.srcPlateId && (
                   <p className="text-xs text-amber-500 mt-0.5">Source plate no longer on canvas.</p>
+                )}
+                {editFieldErrors.srcPlateId && (
+                  <p className="text-xs text-red-500 mt-0.5">{editFieldErrors.srcPlateId}</p>
                 )}
               </div>
               <div>
@@ -448,9 +507,12 @@ export default function ProtocolBuilder({
                   placeholder="e.g. A1"
                   value={editForm.srcWellId}
                   onChange={e => updateEditField('srcWellId', e.target.value)}
-                  className={inputCls}
+                  className={`${inputCls} ${editFieldErrors.srcWellId ? 'border-red-400' : ''}`}
                   maxLength={4}
                 />
+                {editFieldErrors.srcWellId && (
+                  <p className="text-xs text-red-500 mt-0.5">{editFieldErrors.srcWellId}</p>
+                )}
               </div>
             </div>
 
@@ -461,7 +523,7 @@ export default function ProtocolBuilder({
                 <select
                   value={editForm.dstPlateId}
                   onChange={e => updateEditField('dstPlateId', e.target.value)}
-                  className={`${inputCls} ${editingDstMissing ? 'border-amber-400' : ''}`}
+                  className={`${inputCls} ${editingDstMissing || editFieldErrors.dstPlateId ? 'border-red-400' : ''}`}
                 >
                   <option value="">— plate —</option>
                   {editingDstMissing && (
@@ -469,8 +531,11 @@ export default function ProtocolBuilder({
                   )}
                   {plates.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
-                {editingDstMissing && (
+                {editingDstMissing && !editFieldErrors.dstPlateId && (
                   <p className="text-xs text-amber-500 mt-0.5">Dest plate no longer on canvas.</p>
+                )}
+                {editFieldErrors.dstPlateId && (
+                  <p className="text-xs text-red-500 mt-0.5">{editFieldErrors.dstPlateId}</p>
                 )}
               </div>
               <div>
@@ -480,9 +545,12 @@ export default function ProtocolBuilder({
                   placeholder="e.g. B3"
                   value={editForm.dstWellId}
                   onChange={e => updateEditField('dstWellId', e.target.value)}
-                  className={inputCls}
+                  className={`${inputCls} ${editFieldErrors.dstWellId ? 'border-red-400' : ''}`}
                   maxLength={4}
                 />
+                {editFieldErrors.dstWellId && (
+                  <p className="text-xs text-red-500 mt-0.5">{editFieldErrors.dstWellId}</p>
+                )}
               </div>
             </div>
 
@@ -496,8 +564,11 @@ export default function ProtocolBuilder({
                   step={0.1}
                   value={editForm.volume}
                   onChange={e => updateEditField('volume', e.target.value)}
-                  className={inputCls}
+                  className={`${inputCls} ${editFieldErrors.volume ? 'border-red-400' : ''}`}
                 />
+                {editFieldErrors.volume && (
+                  <p className="text-xs text-red-500 mt-0.5">{editFieldErrors.volume}</p>
+                )}
               </div>
               <div>
                 <label className={labelCls}>Liquid Type</label>
