@@ -16,6 +16,9 @@ interface ToolbarProps {
   onToggleDark: () => void;
 }
 
+const ghostBtn = 'px-3 py-1.5 rounded text-sm font-medium transition-colors bg-white/10 hover:bg-white/20 active:bg-white/30 disabled:opacity-40 disabled:cursor-not-allowed';
+const divider  = 'w-px h-5 bg-white/20 mx-1 shrink-0';
+
 export default function Toolbar({
   protocol,
   simRunning,
@@ -32,36 +35,37 @@ export default function Toolbar({
   onToggleDark,
 }: ToolbarProps) {
   return (
-    <header className="flex items-center gap-2 px-4 py-2 bg-indigo-700 text-white shrink-0 shadow-md">
+    <header className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-indigo-900 to-indigo-700 text-white shrink-0 shadow-lg">
       {/* Brand */}
-      <div className="flex items-center gap-2 mr-4">
-        <span className="text-lg font-bold tracking-tight">LabSim</span>
-        <span className="hidden sm:block text-indigo-300 text-xs">Liquid Handling Simulator</span>
+      <div className="flex items-center gap-2 mr-3">
+        <span className="text-base font-bold tracking-tight">LabSim</span>
+        <span className="hidden md:block text-indigo-300 text-xs">Liquid Handling Simulator</span>
       </div>
 
       {/* Protocol name */}
-      <span className="text-indigo-200 text-sm truncate max-w-32">{protocol.name}</span>
+      <span className="text-indigo-200 text-xs truncate max-w-28 hidden sm:block">{protocol.name}</span>
 
       <div className="flex-1" />
 
       {/* Sim result badge */}
       {simResult && !simRunning && (
-        <div
-          className={`text-xs px-2 py-1 rounded font-medium ${
-            simResult.success ? 'bg-green-600' : 'bg-red-600'
-          }`}
-        >
+        <div className={`text-xs px-2.5 py-1 rounded-full font-semibold ${
+          simResult.success
+            ? 'bg-emerald-500/20 text-emerald-200 border border-emerald-500/30'
+            : 'bg-red-500/20 text-red-200 border border-red-500/30'
+        }`}>
           {simResult.success
-            ? `✓ ${simResult.stats.totalVolumeTransferred} µL / ${simResult.stats.completedSteps} steps`
+            ? `✓ ${simResult.stats.totalVolumeTransferred} µL · ${simResult.stats.completedSteps} steps`
             : `✕ ${simResult.errors.length} error(s)`}
         </div>
       )}
 
       <div className="flex items-center gap-1 flex-wrap">
+        {/* Run / Reset */}
         <button
           onClick={onRun}
           disabled={simRunning}
-          className="flex items-center gap-1 px-3 py-1.5 bg-green-500 hover:bg-green-400 disabled:opacity-50 disabled:cursor-not-allowed rounded text-sm font-semibold transition-colors"
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed rounded text-sm font-semibold transition-colors shadow-sm shadow-emerald-900/30"
         >
           {simRunning ? (
             <>
@@ -74,76 +78,47 @@ export default function Toolbar({
         <button
           onClick={onReset}
           disabled={simRunning}
-          className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded text-sm font-medium transition-colors"
+          className={ghostBtn}
           title="Reset well volumes"
         >
           Reset
         </button>
 
-        {/* Separator */}
-        <span className="w-px h-5 bg-indigo-500 mx-0.5" />
+        <span className={divider} />
 
-        <button
-          onClick={onSave}
-          className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded text-sm font-medium transition-colors"
-          title="Save to localStorage"
-        >
-          Save
-        </button>
+        {/* Persistence */}
+        <button onClick={onSave} className={ghostBtn} title="Save to browser storage">Save</button>
+        <button onClick={onLoad} className={ghostBtn} title="Load from browser storage">Load</button>
+        <button onClick={onImport} disabled={simRunning} className={ghostBtn} title="Import from CSV / JSON / Excel">Import</button>
 
-        <button
-          onClick={onLoad}
-          className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded text-sm font-medium transition-colors"
-          title="Load from localStorage"
-        >
-          Load
-        </button>
+        <span className={divider} />
 
-        <button
-          onClick={onImport}
-          disabled={simRunning}
-          className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded text-sm font-medium transition-colors"
-          title="Import protocol from CSV / JSON / Excel / text file"
-        >
-          Import
-        </button>
-
-        {/* Separator */}
-        <span className="w-px h-5 bg-indigo-500 mx-0.5" />
-
-        <button
-          onClick={onExportCSV}
-          disabled={simRunning}
-          className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded text-sm font-medium transition-colors"
-          title="Export protocol as CSV"
-        >
-          CSV
-        </button>
-
+        {/* Export / Stats */}
+        <button onClick={onExportCSV} disabled={simRunning} className={ghostBtn} title="Export as CSV">CSV</button>
         <button
           onClick={onShowStats}
           disabled={!simResult}
-          className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-30 disabled:cursor-not-allowed rounded text-sm font-medium transition-colors"
+          className={ghostBtn}
           title="View simulation statistics"
         >
           Stats
         </button>
 
-        {/* Separator */}
-        <span className="w-px h-5 bg-indigo-500 mx-0.5" />
+        <span className={divider} />
 
+        {/* Danger + theme */}
         <button
           onClick={onClear}
           disabled={simRunning}
-          className="px-3 py-1.5 bg-red-600 hover:bg-red-500 disabled:opacity-50 rounded text-sm font-medium transition-colors"
-          title="Clear all plates from canvas"
+          className="px-3 py-1.5 rounded text-sm font-medium transition-colors bg-red-500/70 hover:bg-red-500 active:bg-red-600 disabled:opacity-40 disabled:cursor-not-allowed"
+          title="Clear all plates"
         >
           Clear
         </button>
 
         <button
           onClick={onToggleDark}
-          className="px-2 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded text-sm transition-colors"
+          className="px-2 py-1.5 rounded text-sm transition-colors bg-white/10 hover:bg-white/20"
           title="Toggle dark mode"
         >
           {darkMode ? '☀' : '🌙'}

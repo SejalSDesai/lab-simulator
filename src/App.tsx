@@ -405,6 +405,7 @@ export default function App() {
           simResult={simResult}
           darkMode={darkMode}
           onProtocolChange={setProtocol}
+          onClearSimResult={() => setSimResult(null)}
         />
       </div>
 
