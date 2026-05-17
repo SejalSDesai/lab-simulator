@@ -5,6 +5,7 @@ import PlateComponent from './PlateComponent';
 import type { Plate, ProtocolStep, SimulationResult, LiquidCategory, WellAddress } from '../types';
 import {
   PLATE_CONFIGS, PLATE_PADDING, PLATE_LABEL_HEIGHT, RESERVOIR_MAX_VOLUME,
+  PIPETTE_PRESETS, ROW_LABELS,
 } from '../types';
 import { snapToGrid } from '../utils';
 import { applyStep } from '../simulator';
@@ -87,6 +88,30 @@ function totalVolumeForStep(step: ProtocolStep, numDests: number): number {
   return step.volumeMode === 'distribute' ? step.volume : step.volume * numDests;
 }
 
+/** True for column/row multi-channel steps where every tip has its own source well. */
+function isParallelMultiCh(step: ProtocolStep): boolean {
+  const pip = PIPETTE_PRESETS.find(p => p.id === step.pipetteId);
+  return (pip?.tipCount ?? 1) > 1 &&
+    (step.selectionMode === 'column' || step.selectionMode === 'row');
+}
+
+/** Reconstruct all source well addresses for a parallel multi-channel step. */
+function getStepSrcAddresses(step: ProtocolStep, tipCount: number): WellAddress[] {
+  if (step.selectionMode === 'column' && step.sourceColumn) {
+    return ROW_LABELS.slice(0, tipCount).map(row => ({
+      plateId: step.sourceAddress.plateId,
+      wellId:  `${row}${step.sourceColumn}`,
+    }));
+  }
+  if (step.selectionMode === 'row' && step.sourceRow) {
+    return Array.from({ length: tipCount }, (_, i) => ({
+      plateId: step.sourceAddress.plateId,
+      wellId:  `${step.sourceRow}${i + 1}`,
+    }));
+  }
+  return [step.sourceAddress];
+}
+
 const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
   {
     plates, selectedPlateId, selectedWells, animatingStepIndex,
@@ -100,6 +125,7 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
 
   const wellRefs              = useRef<Map<string, Konva.Node>>(new Map());
   const pipetteRef            = useRef<Konva.Group>(null);
+  const multiPipetteGroupRef  = useRef<Konva.Group>(null);
   const cancelledRef          = useRef(false);
   const dragStartPos          = useRef<{ x: number; y: number } | null>(null);
   const isDraggingRubber      = useRef(false);
@@ -147,6 +173,90 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     const node = wellRefs.current.get(`${plateId}:${wellId}`);
     if (!node) return;
     await tweenTo(node, { fill: targetColor }, DUR_COLOR);
+  }
+
+  /**
+   * Animate a parallel multi-channel step.
+   * Builds N tip markers in multiPipetteGroupRef, moves the group as one tween,
+   * fills all source/dest wells simultaneously via Promise.all.
+   * Returns the volume transferred (volume × tipCount), or 0 if cancelled.
+   */
+  async function animateMultiChStep(
+    step: ProtocolStep,
+    srcAddrs: WellAddress[],
+    dstAddrs: WellAddress[],
+    currentPlates: Plate[],
+  ): Promise<number> {
+    const grp = multiPipetteGroupRef.current;
+    if (!grp) return 0;
+
+    const srcPositions = srcAddrs.map(a => getWellCanvasPosition(currentPlates, a));
+    const dstPositions = dstAddrs.map(a => getWellCanvasPosition(currentPlates, a));
+    const firstSrc = srcPositions.find(p => p !== null) ?? null;
+    const firstDst = dstPositions.find(p => p !== null) ?? null;
+    if (!firstSrc || !firstDst) return 0;
+
+    // Build tip markers relative to the first source well position
+    grp.destroyChildren();
+    for (const pos of srcPositions) {
+      if (!pos) continue;
+      const rx = pos.x - firstSrc.x;
+      const ry = pos.y - firstSrc.y;
+      grp.add(
+        new Konva.Rect({
+          x: rx - 3, y: ry - 22, width: 6, height: 18,
+          fill: '#6366f1', cornerRadius: 1, opacity: 0.85,
+        }),
+        new Konva.Line({
+          points: [rx - 3, ry - 4, rx + 3, ry - 4, rx, ry + 2],
+          closed: true, fill: '#818cf8', stroke: '#4f46e5', strokeWidth: 0.5, opacity: 0.85,
+        }),
+      );
+    }
+
+    // Position group at first source well, hide single-tip pipette
+    grp.position({ x: firstSrc.x, y: firstSrc.y - 18 });
+    grp.visible(true);
+    pipetteRef.current?.visible(false);
+
+    await wait(180);
+
+    // Fill all source wells simultaneously
+    await Promise.all(srcAddrs.map(addr => {
+      const plate = currentPlates.find(p => p.id === addr.plateId);
+      const well  = plate?.wells.flat().find(w => w.id === addr.wellId);
+      if (!well || well.maxVolume >= RESERVOIR_MAX_VOLUME) return Promise.resolve();
+      const afterVol = Math.max(0, well.volume - step.volume);
+      return animateWellColor(addr.plateId, addr.wellId, getColorForVolume(afterVol, well.maxVolume, well.liquidType));
+    }));
+
+    if (cancelledRef.current) {
+      grp.visible(false);
+      grp.destroyChildren();
+      pipetteRef.current?.visible(true);
+      return 0;
+    }
+
+    // Move group to first dest well as one tween
+    await tweenTo(grp, { x: firstDst.x, y: firstDst.y - 18 }, DUR_TRAVEL);
+    await wait(180);
+
+    // Fill all destination wells simultaneously
+    await Promise.all(dstAddrs.map(addr => {
+      const plate = currentPlates.find(p => p.id === addr.plateId);
+      const well  = plate?.wells.flat().find(w => w.id === addr.wellId);
+      if (!well) return Promise.resolve();
+      const afterVol = well.volume + step.volume;
+      return animateWellColor(addr.plateId, addr.wellId, getColorForVolume(afterVol, well.maxVolume, step.liquidType));
+    }));
+
+    // Return home and clean up before the calling code triggers a re-render
+    await tweenTo(grp, { x: HOME_X, y: HOME_Y }, DUR_RETURN);
+    grp.visible(false);
+    grp.destroyChildren();
+    pipetteRef.current?.visible(true);
+
+    return step.volume * Math.min(srcAddrs.length, dstAddrs.length);
   }
 
   // ── Rubber-band handlers ───────────────────────────────────────────────────
@@ -225,60 +335,73 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
       for (let i = 0; i < steps.length; i++) {
         if (cancelledRef.current) break;
 
-        const step     = steps[i];
+        const step = steps[i];
         onStepStart(i);
 
         if (step.pipetteId !== lastPip) { tipChanges++; lastPip = step.pipetteId; }
 
-        const dests     = getDestAddresses(step);
-        const numDests  = dests.length;
-        const perDest   = volumePerDest(step, numDests);
-        const totalVol  = totalVolumeForStep(step, numDests);
+        if (isParallelMultiCh(step)) {
+          // ── Parallel multi-channel (column / row mode) ──────────────────
+          const pip      = PIPETTE_PRESETS.find(p => p.id === step.pipetteId)!;
+          const srcAddrs = getStepSrcAddresses(step, pip.tipCount);
+          const dstAddrs = getDestAddresses(step);
 
-        // ── Source ──
-        const srcPos   = getWellCanvasPosition(currentPlates, step.sourceAddress);
-        const srcPlate = currentPlates.find(p => p.id === step.sourceAddress.plateId);
-        const srcWell  = srcPlate?.wells.flat().find(w => w.id === step.sourceAddress.wellId);
-        const srcIsReservoir = srcWell ? srcWell.maxVolume >= RESERVOIR_MAX_VOLUME : false;
-
-        if (srcPos) await movePipetteTo(srcPos.x, srcPos.y);
-        await wait(180);
-
-        if (srcWell && srcPlate && !srcIsReservoir) {
-          const afterVol   = Math.max(0, srcWell.volume - totalVol);
-          const targetColor = getColorForVolume(afterVol, srcWell.maxVolume, srcWell.liquidType);
-          await animateWellColor(step.sourceAddress.plateId, step.sourceAddress.wellId, targetColor);
-        }
-
-        if (cancelledRef.current) break;
-
-        // ── Destinations ──
-        for (const destAddr of dests) {
+          const volContrib = await animateMultiChStep(step, srcAddrs, dstAddrs, currentPlates);
           if (cancelledRef.current) break;
 
-          const dstPos   = getWellCanvasPosition(currentPlates, destAddr);
-          const dstPlate = currentPlates.find(p => p.id === destAddr.plateId);
-          const dstWell  = dstPlate?.wells.flat().find(w => w.id === destAddr.wellId);
+          currentPlates  = applyStep(currentPlates, step);
+          totalVolume   += volContrib;
+          completedSteps++;
+          onPlatesUpdate([...currentPlates]);
+        } else {
+          // ── Single-channel / individual multi-dest ──────────────────────
+          const dests    = getDestAddresses(step);
+          const numDests = dests.length;
+          const perDest  = volumePerDest(step, numDests);
+          const totalVol = totalVolumeForStep(step, numDests);
 
-          if (dstPos) await movePipetteTo(dstPos.x, dstPos.y);
+          const srcPos         = getWellCanvasPosition(currentPlates, step.sourceAddress);
+          const srcPlate       = currentPlates.find(p => p.id === step.sourceAddress.plateId);
+          const srcWell        = srcPlate?.wells.flat().find(w => w.id === step.sourceAddress.wellId);
+          const srcIsReservoir = srcWell ? srcWell.maxVolume >= RESERVOIR_MAX_VOLUME : false;
+
+          if (srcPos) await movePipetteTo(srcPos.x, srcPos.y);
           await wait(180);
 
-          if (dstWell && dstPlate) {
-            const afterVol   = dstWell.volume + perDest;
-            const liquidType = step.liquidType as LiquidCategory;
-            const targetColor = getColorForVolume(afterVol, dstWell.maxVolume, liquidType);
-            await animateWellColor(destAddr.plateId, destAddr.wellId, targetColor);
+          if (srcWell && srcPlate && !srcIsReservoir) {
+            const afterVol    = Math.max(0, srcWell.volume - totalVol);
+            const targetColor = getColorForVolume(afterVol, srcWell.maxVolume, srcWell.liquidType);
+            await animateWellColor(step.sourceAddress.plateId, step.sourceAddress.wellId, targetColor);
           }
+
+          if (cancelledRef.current) break;
+
+          for (const destAddr of dests) {
+            if (cancelledRef.current) break;
+
+            const dstPos   = getWellCanvasPosition(currentPlates, destAddr);
+            const dstPlate = currentPlates.find(p => p.id === destAddr.plateId);
+            const dstWell  = dstPlate?.wells.flat().find(w => w.id === destAddr.wellId);
+
+            if (dstPos) await movePipetteTo(dstPos.x, dstPos.y);
+            await wait(180);
+
+            if (dstWell && dstPlate) {
+              const afterVol    = dstWell.volume + perDest;
+              const targetColor = getColorForVolume(afterVol, dstWell.maxVolume, step.liquidType as LiquidCategory);
+              await animateWellColor(destAddr.plateId, destAddr.wellId, targetColor);
+            }
+          }
+
+          if (cancelledRef.current) break;
+
+          currentPlates  = applyStep(currentPlates, step);
+          totalVolume   += totalVol;
+          completedSteps++;
+          onPlatesUpdate([...currentPlates]);
+
+          await returnPipetteHome();
         }
-
-        if (cancelledRef.current) break;
-
-        currentPlates  = applyStep(currentPlates, step);
-        totalVolume   += totalVol;
-        completedSteps += 1;
-        onPlatesUpdate([...currentPlates]);
-
-        await returnPipetteHome();
       }
 
       onDone({
@@ -377,26 +500,16 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
 
         {/* ── Pipette layer (always on top) ── */}
         <Layer listening={false}>
+          {/* Single-tip pipette — used for single-channel and individual-mode steps */}
           <Group ref={pipetteRef} x={HOME_X} y={HOME_Y} visible={animatingStepIndex >= 0}>
-            <Rect
-              x={-5}
-              y={-30}
-              width={10}
-              height={26}
-              fill="#6366f1"
-              cornerRadius={2}
-              opacity={0.9}
-            />
-            <Line
-              points={[-5, -4, 5, -4, 0, 4]}
-              closed={true}
-              fill="#818cf8"
-              stroke="#4f46e5"
-              strokeWidth={0.5}
-              opacity={0.9}
-            />
+            <Rect x={-5} y={-30} width={10} height={26} fill="#6366f1" cornerRadius={2} opacity={0.9} />
+            <Line points={[-5, -4, 5, -4, 0, 4]} closed={true} fill="#818cf8" stroke="#4f46e5" strokeWidth={0.5} opacity={0.9} />
             <KonvaCircle x={0} y={-20} radius={2.5} fill="#c7d2fe" opacity={0.8} />
           </Group>
+          {/* Multi-tip group — children built imperatively during parallel multi-channel steps.
+              visible=false is a static prop so React-Konva never overrides the imperative
+              visible(true) set during animation (React-Konva only diffs changed props). */}
+          <Group ref={multiPipetteGroupRef} x={HOME_X} y={HOME_Y} visible={false} />
         </Layer>
       </Stage>
     </div>
