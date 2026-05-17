@@ -8,7 +8,7 @@ import type {
   SimulationStats,
   WellAddress,
 } from './types';
-import { RESERVOIR_MAX_VOLUME } from './types';
+import { RESERVOIR_MAX_VOLUME, ROW_LABELS, PIPETTE_PRESETS } from './types';
 
 function deepCopyPlates(plates: Plate[]): Plate[] {
   return plates.map(plate => ({
@@ -36,6 +36,29 @@ function getDestAddresses(step: ProtocolStep): WellAddress[] {
   return step.destAddresses && step.destAddresses.length > 0
     ? step.destAddresses
     : [step.destAddress];
+}
+
+/** True for column/row multi-channel steps where each tip has its own source well. */
+function isParallelMultiChannel(step: ProtocolStep, pipette: Pipette): boolean {
+  return pipette.tipCount > 1 &&
+    (step.selectionMode === 'column' || step.selectionMode === 'row');
+}
+
+/** Reconstruct all source well addresses for a parallel multi-channel step. */
+function getSourceAddresses(step: ProtocolStep, tipCount: number): WellAddress[] {
+  if (step.selectionMode === 'column' && step.sourceColumn) {
+    return ROW_LABELS.slice(0, tipCount).map(row => ({
+      plateId: step.sourceAddress.plateId,
+      wellId:  `${row}${step.sourceColumn}`,
+    }));
+  }
+  if (step.selectionMode === 'row' && step.sourceRow) {
+    return Array.from({ length: tipCount }, (_, i) => ({
+      plateId: step.sourceAddress.plateId,
+      wellId:  `${step.sourceRow}${i + 1}`,
+    }));
+  }
+  return [step.sourceAddress];
 }
 
 function volumePerDest(step: ProtocolStep, numDests: number): number {
@@ -68,62 +91,114 @@ export function validateProtocol(
       return;
     }
 
-    const dests     = getDestAddresses(step);
-    const numDests  = dests.length;
-    const perDest   = volumePerDest(step, numDests);
-    const totalVol  = totalVolumeNeeded(step, numDests);
-
-    if (perDest < pipette.minVolume || perDest > pipette.maxVolume) {
+    if (step.volume < pipette.minVolume || step.volume > pipette.maxVolume) {
       errors.push({
         stepId: step.id, stepIndex: index,
-        message: `Step ${n}: ${perDest.toFixed(1)} µL/well is outside ${pipette.name} range (${pipette.minVolume}–${pipette.maxVolume} µL).`,
+        message: `Step ${n}: ${step.volume} µL/tip is outside ${pipette.name} range (${pipette.minVolume}–${pipette.maxVolume} µL).`,
         severity: 'error',
       });
     }
 
-    const src = findWell(simPlates, step.sourceAddress.plateId, step.sourceAddress.wellId);
-    if (!src) {
-      errors.push({ stepId: step.id, stepIndex: index, message: `Step ${n}: Source well ${step.sourceAddress.wellId} not found.`, severity: 'error' });
-      return;
-    }
+    if (isParallelMultiChannel(step, pipette)) {
+      // ── Parallel multi-channel (column / row mode) ──────────────────
+      // Each tip has its own source well; validate and apply each pair independently.
+      const srcAddrs = getSourceAddresses(step, pipette.tipCount);
+      const dstAddrs = getDestAddresses(step);
+      const pairLen  = Math.min(srcAddrs.length, dstAddrs.length);
 
-    if (!isReservoirWell(src) && src.volume < totalVol) {
-      errors.push({
-        stepId: step.id, stepIndex: index,
-        message: `Step ${n}: Source ${step.sourceAddress.wellId} has ${src.volume} µL — need ${totalVol} µL.`,
-        severity: 'error',
-      });
-    }
+      for (let i = 0; i < pairLen; i++) {
+        const src = findWell(simPlates, srcAddrs[i].plateId, srcAddrs[i].wellId);
+        const dst = findWell(simPlates, dstAddrs[i].plateId, dstAddrs[i].wellId);
 
-    for (const destAddr of dests) {
-      const dst = findWell(simPlates, destAddr.plateId, destAddr.wellId);
-      if (!dst) {
-        errors.push({ stepId: step.id, stepIndex: index, message: `Step ${n}: Destination well ${destAddr.wellId} not found.`, severity: 'error' });
-        continue;
+        if (!src) {
+          errors.push({ stepId: step.id, stepIndex: index, message: `Step ${n}: Source well ${srcAddrs[i].wellId} not found.`, severity: 'error' });
+          continue;
+        }
+        if (!dst) {
+          errors.push({ stepId: step.id, stepIndex: index, message: `Step ${n}: Destination well ${dstAddrs[i].wellId} not found.`, severity: 'error' });
+          continue;
+        }
+        if (!isReservoirWell(src) && src.volume < step.volume) {
+          errors.push({
+            stepId: step.id, stepIndex: index,
+            message: `Step ${n}: Source ${srcAddrs[i].wellId} has ${src.volume} µL — need ${step.volume} µL.`,
+            severity: 'error',
+          });
+        }
+        if (dst.volume + step.volume > dst.maxVolume) {
+          errors.push({
+            stepId: step.id, stepIndex: index,
+            message: `Step ${n}: Destination ${dstAddrs[i].wellId} would overflow (${dst.volume} + ${step.volume} > ${dst.maxVolume} µL max).`,
+            severity: 'error',
+          });
+        }
+        if (srcAddrs[i].plateId === dstAddrs[i].plateId && srcAddrs[i].wellId === dstAddrs[i].wellId) {
+          errors.push({ stepId: step.id, stepIndex: index, message: `Step ${n}: Source and destination are the same well.`, severity: 'warning' });
+        }
       }
-      if (dst.volume + perDest > dst.maxVolume) {
+
+      const hasBlockingError = errors.some(e => e.stepIndex === index && e.severity === 'error');
+      if (!hasBlockingError) {
+        for (let i = 0; i < pairLen; i++) {
+          const src = findWell(simPlates, srcAddrs[i].plateId, srcAddrs[i].wellId);
+          const dst = findWell(simPlates, dstAddrs[i].plateId, dstAddrs[i].wellId);
+          if (src && !isReservoirWell(src)) src.volume -= step.volume;
+          if (dst) { dst.volume += step.volume; dst.liquidType = step.liquidType; }
+        }
+      }
+    } else {
+      // ── Single-channel / individual multi-dest ──────────────────────
+      const dests    = getDestAddresses(step);
+      const numDests = dests.length;
+      const perDest  = volumePerDest(step, numDests);
+      const totalVol = totalVolumeNeeded(step, numDests);
+
+      // Re-check volume range with effective per-dest volume (distribute mode)
+      if (step.volumeMode === 'distribute' && (perDest < pipette.minVolume || perDest > pipette.maxVolume)) {
         errors.push({
           stepId: step.id, stepIndex: index,
-          message: `Step ${n}: Destination ${destAddr.wellId} would overflow (${dst.volume} + ${perDest.toFixed(1)} > ${dst.maxVolume} µL max).`,
+          message: `Step ${n}: Distributed ${perDest.toFixed(1)} µL/well is outside ${pipette.name} range.`,
           severity: 'error',
         });
       }
-      if (
-        step.sourceAddress.plateId === destAddr.plateId &&
-        step.sourceAddress.wellId  === destAddr.wellId
-      ) {
-        errors.push({ stepId: step.id, stepIndex: index, message: `Step ${n}: Source and destination are the same well.`, severity: 'warning' });
-      }
-    }
 
-    const hasBlockingError = errors.some(e => e.stepIndex === index && e.severity === 'error');
-    if (!hasBlockingError) {
-      if (!isReservoirWell(src)) src.volume -= totalVol;
+      const src = findWell(simPlates, step.sourceAddress.plateId, step.sourceAddress.wellId);
+      if (!src) {
+        errors.push({ stepId: step.id, stepIndex: index, message: `Step ${n}: Source well ${step.sourceAddress.wellId} not found.`, severity: 'error' });
+        return;
+      }
+      if (!isReservoirWell(src) && src.volume < totalVol) {
+        errors.push({
+          stepId: step.id, stepIndex: index,
+          message: `Step ${n}: Source ${step.sourceAddress.wellId} has ${src.volume} µL — need ${totalVol} µL.`,
+          severity: 'error',
+        });
+      }
+
       for (const destAddr of dests) {
         const dst = findWell(simPlates, destAddr.plateId, destAddr.wellId);
-        if (dst) {
-          dst.volume    += perDest;
-          dst.liquidType = step.liquidType;
+        if (!dst) {
+          errors.push({ stepId: step.id, stepIndex: index, message: `Step ${n}: Destination well ${destAddr.wellId} not found.`, severity: 'error' });
+          continue;
+        }
+        if (dst.volume + perDest > dst.maxVolume) {
+          errors.push({
+            stepId: step.id, stepIndex: index,
+            message: `Step ${n}: Destination ${destAddr.wellId} would overflow (${dst.volume} + ${perDest.toFixed(1)} > ${dst.maxVolume} µL max).`,
+            severity: 'error',
+          });
+        }
+        if (step.sourceAddress.plateId === destAddr.plateId && step.sourceAddress.wellId === destAddr.wellId) {
+          errors.push({ stepId: step.id, stepIndex: index, message: `Step ${n}: Source and destination are the same well.`, severity: 'warning' });
+        }
+      }
+
+      const hasBlockingError = errors.some(e => e.stepIndex === index && e.severity === 'error');
+      if (!hasBlockingError) {
+        if (!isReservoirWell(src)) src.volume -= totalVol;
+        for (const destAddr of dests) {
+          const dst = findWell(simPlates, destAddr.plateId, destAddr.wellId);
+          if (dst) { dst.volume += perDest; dst.liquidType = step.liquidType; }
         }
       }
     }
@@ -133,8 +208,23 @@ export function validateProtocol(
 }
 
 export function applyStep(plates: Plate[], step: ProtocolStep): Plate[] {
-  const updated  = deepCopyPlates(plates);
-  const src      = findWell(updated, step.sourceAddress.plateId, step.sourceAddress.wellId);
+  const updated = deepCopyPlates(plates);
+  const pipette = PIPETTE_PRESETS.find(p => p.id === step.pipetteId);
+
+  if (pipette && isParallelMultiChannel(step, pipette)) {
+    const srcAddrs = getSourceAddresses(step, pipette.tipCount);
+    const dstAddrs = getDestAddresses(step);
+    const pairLen  = Math.min(srcAddrs.length, dstAddrs.length);
+    for (let i = 0; i < pairLen; i++) {
+      const src = findWell(updated, srcAddrs[i].plateId, srcAddrs[i].wellId);
+      const dst = findWell(updated, dstAddrs[i].plateId, dstAddrs[i].wellId);
+      if (src && !isReservoirWell(src)) src.volume -= step.volume;
+      if (dst) { dst.volume += step.volume; dst.liquidType = step.liquidType; }
+    }
+    return updated;
+  }
+
+  const src = findWell(updated, step.sourceAddress.plateId, step.sourceAddress.wellId);
   if (!src) return plates;
 
   const dests    = getDestAddresses(step);
@@ -143,13 +233,9 @@ export function applyStep(plates: Plate[], step: ProtocolStep): Plate[] {
   const totalVol = totalVolumeNeeded(step, numDests);
 
   if (!isReservoirWell(src)) src.volume -= totalVol;
-
   for (const destAddr of dests) {
     const dst = findWell(updated, destAddr.plateId, destAddr.wellId);
-    if (dst) {
-      dst.volume    += perDest;
-      dst.liquidType = step.liquidType;
-    }
+    if (dst) { dst.volume += perDest; dst.liquidType = step.liquidType; }
   }
   return updated;
 }
@@ -188,30 +274,47 @@ export function executeProtocol(
   let completedSteps   = 0;
 
   for (const step of steps) {
-    const src = findWell(updatedPlates, step.sourceAddress.plateId, step.sourceAddress.wellId);
-    if (!src) continue;
-
-    const dests    = getDestAddresses(step);
-    const numDests = dests.length;
-    const perDest  = volumePerDest(step, numDests);
-    const totalVol = totalVolumeNeeded(step, numDests);
+    const pipette = pipettes.find(p => p.id === step.pipetteId);
+    if (!pipette) continue;
 
     if (step.pipetteId !== lastPipetteId) {
       tipChanges++;
       lastPipetteId = step.pipetteId;
     }
 
-    if (!isReservoirWell(src)) src.volume -= totalVol;
+    if (isParallelMultiChannel(step, pipette)) {
+      // ── Parallel multi-channel ──────────────────────────────────────
+      const srcAddrs = getSourceAddresses(step, pipette.tipCount);
+      const dstAddrs = getDestAddresses(step);
+      const pairLen  = Math.min(srcAddrs.length, dstAddrs.length);
 
-    for (const destAddr of dests) {
-      const dst = findWell(updatedPlates, destAddr.plateId, destAddr.wellId);
-      if (dst) {
-        dst.volume    += perDest;
-        dst.liquidType = step.liquidType;
+      for (let i = 0; i < pairLen; i++) {
+        const src = findWell(updatedPlates, srcAddrs[i].plateId, srcAddrs[i].wellId);
+        const dst = findWell(updatedPlates, dstAddrs[i].plateId, dstAddrs[i].wellId);
+        if (src && !isReservoirWell(src)) src.volume -= step.volume;
+        if (dst) { dst.volume += step.volume; dst.liquidType = step.liquidType; }
       }
+
+      totalVolume += step.volume * pairLen;
+    } else {
+      // ── Single-channel / individual multi-dest ──────────────────────
+      const src = findWell(updatedPlates, step.sourceAddress.plateId, step.sourceAddress.wellId);
+      if (!src) continue;
+
+      const dests    = getDestAddresses(step);
+      const numDests = dests.length;
+      const perDest  = volumePerDest(step, numDests);
+      const totalVol = totalVolumeNeeded(step, numDests);
+
+      if (!isReservoirWell(src)) src.volume -= totalVol;
+      for (const destAddr of dests) {
+        const dst = findWell(updatedPlates, destAddr.plateId, destAddr.wellId);
+        if (dst) { dst.volume += perDest; dst.liquidType = step.liquidType; }
+      }
+
+      totalVolume += totalVol;
     }
 
-    totalVolume += totalVol;
     completedSteps++;
   }
 
