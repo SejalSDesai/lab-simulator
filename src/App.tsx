@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Canvas, { type CanvasHandle } from './components/Canvas';
 import Sidebar from './components/Sidebar';
+import EmailGate, { getStoredEmail } from './components/EmailGate';
 import ProtocolBuilder from './components/ProtocolBuilder';
 import Toolbar from './components/Toolbar';
 import Toast from './components/Toast';
@@ -47,6 +48,16 @@ function findDropPosition(plates: Plate[], type: PlateType): { x: number; y: num
 }
 
 export default function App() {
+  const [unlocked, setUnlocked] = useState(() => getStoredEmail() !== null);
+
+  if (!unlocked) {
+    return <EmailGate onUnlock={() => setUnlocked(true)} />;
+  }
+
+  return <AppInner />;
+}
+
+function AppInner() {
   const [plates,            setPlates           ] = useState<Plate[]>([]);
   const [protocol,          setProtocol         ] = useState<Protocol>(defaultProtocol);
   const [selectedPlateId,   setSelectedPlateId  ] = useState<string | null>(null);
